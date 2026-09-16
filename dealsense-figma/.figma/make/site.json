@@ -1,0 +1,10 @@
+{
+  "description": "Enhance your online shopping experience with an AI-powered browser extension that evaluates product prices, seller credibility, and reviews for safer purchases.",
+  "robots": {
+    "index": false
+  },
+  "accessibility": {
+    "addBypassLinks": false,
+    "ignoreReducedMotion": false
+  }
+}

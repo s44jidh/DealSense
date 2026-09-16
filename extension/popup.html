@@ -1,0 +1,166 @@
+﻿<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=410, initial-scale=1.0" />
+  <title>DealSense</title>
+  <link rel="stylesheet" href="popup.css" />
+</head>
+<body>
+
+  <!-- ============================
+       HEADER
+       ============================ -->
+  <header class="ds-header">
+    <div class="ds-logo">
+      <span class="ds-logo-wordmark">DealSense</span>
+      <span class="ds-badge">Beta</span>
+    </div>
+    <div class="ds-status-indicator">
+      <span class="ds-status-dot" id="ds-status-dot"></span>
+      <span id="ds-status-text">Ready</span>
+    </div>
+  </header>
+
+  <!-- ============================
+       SITE DETECTION BANNER
+       ============================ -->
+  <div class="ds-site-banner" id="ds-site-banner">
+    <div class="ds-site-info">
+      <div class="ds-site-icon">
+        <svg viewBox="0 0 12 12" xmlns="http://www.w3.org/2000/svg">
+          <circle cx="6" cy="6" r="5" fill="none" stroke="#999" stroke-width="1.2"/>
+          <path d="M4 6h4M6 4v4" stroke="#999" stroke-width="1.2" stroke-linecap="round"/>
+        </svg>
+      </div>
+      <span class="ds-site-label" id="ds-site-label">Detecting page...</span>
+    </div>
+    <span id="ds-site-tag" class="ds-unsupported-tag" style="display:none;"></span>
+  </div>
+
+  <!-- ============================
+       MAIN CONTENT — SUPPORTED PAGE
+       ============================ -->
+  <main class="ds-body" id="ds-main-supported">
+
+    <!-- Product Card -->
+    <div class="ds-product-card" id="ds-product-card">
+      <div class="ds-product-header">
+        <div class="ds-product-thumb" id="ds-product-thumb">
+          <!-- Placeholder icon -->
+          <svg class="ds-product-thumb-placeholder" viewBox="0 0 24 24" xmlns="http://www.w3.org/2000/svg">
+            <path fill="#cccccc" d="M20 7h-4V5a3 3 0 0 0-6 0v2H6a1 1 0 0 0-1 1v11a2 2 0 0 0 2 2h10a2 2 0 0 0 2-2V8a1 1 0 0 0-1-1ZM12 4a1 1 0 0 1 1 1v2h-2V5a1 1 0 0 1 1-1Z"/>
+          </svg>
+        </div>
+        <div class="ds-product-meta">
+          <div class="ds-product-title" id="ds-product-title">Navigate to a product page</div>
+          <div class="ds-product-sub" id="ds-product-sub">Waiting for product detection</div>
+        </div>
+        <div class="ds-product-price muted" id="ds-product-price">—</div>
+      </div>
+      <div class="ds-metrics-row">
+        <div class="ds-metric">
+          <span class="ds-metric-label">Rating</span>
+          <span class="ds-metric-value muted" id="ds-metric-rating">—</span>
+        </div>
+        <div class="ds-metric">
+          <span class="ds-metric-label">Reviews</span>
+          <span class="ds-metric-value muted" id="ds-metric-reviews">—</span>
+        </div>
+        <div class="ds-metric">
+          <span class="ds-metric-label">Seller</span>
+          <span class="ds-metric-value muted" id="ds-metric-seller">—</span>
+        </div>
+      </div>
+    </div>
+
+    <!-- Analysis Placeholder (default state) -->
+    <div class="ds-analysis-placeholder" id="ds-placeholder">
+      <div class="ds-placeholder-icon">
+        <svg viewBox="0 0 24 24" xmlns="http://www.w3.org/2000/svg">
+          <path d="M9 19v-6a2 2 0 0 0-2-2H5a2 2 0 0 0-2 2v6a2 2 0 0 0 2 2h2a2 2 0 0 0 2-2Zm0 0V9a2 2 0 0 1 2-2h2a2 2 0 0 1 2 2v10m-6 0a2 2 0 0 0 2 2h2a2 2 0 0 0 2-2m0 0V5a2 2 0 0 1 2-2h2a2 2 0 0 1 2 2v14a2 2 0 0 1-2 2h-2a2 2 0 0 1-2-2Z"/>
+        </svg>
+      </div>
+      <div class="ds-placeholder-title">No analysis yet</div>
+      <div class="ds-placeholder-sub">Click "Analyze Product" to run<br>an intelligent deal assessment.</div>
+    </div>
+
+    <!-- Loading State (hidden initially) -->
+    <div class="ds-loading" id="ds-loading">
+      <div class="ds-loading-spinner"></div>
+      <div class="ds-loading-text">Analyzing product...</div>
+      <div class="ds-loading-step" id="ds-loading-step">Collecting data</div>
+    </div>
+
+    <!-- Result State (hidden initially) -->
+    <div class="ds-result" id="ds-result">
+
+      <!-- Verdict Card -->
+      <div class="ds-verdict">
+        <div class="ds-verdict-header">
+          <span class="ds-verdict-label">Deal Score</span>
+          <span class="ds-verdict-score" id="ds-verdict-score">—</span>
+        </div>
+        <div class="ds-verdict-body">
+          <div class="ds-verdict-item">
+            <span class="ds-verdict-item-label">Price Fair</span>
+            <span class="ds-verdict-item-value" id="ds-verd-price">—</span>
+          </div>
+          <div class="ds-verdict-item">
+            <span class="ds-verdict-item-label">Review Trust</span>
+            <span class="ds-verdict-item-value" id="ds-verd-trust">—</span>
+          </div>
+          <div class="ds-verdict-item">
+            <span class="ds-verdict-item-label">Seller</span>
+            <span class="ds-verdict-item-value" id="ds-verd-seller">—</span>
+          </div>
+          <div class="ds-verdict-item">
+            <span class="ds-verdict-item-label">Verdict</span>
+            <span class="ds-verdict-item-value" id="ds-verd-verdict">—</span>
+          </div>
+        </div>
+      </div>
+
+      <!-- Signals -->
+      <div class="ds-signals" id="ds-signals">
+        <div class="ds-signal-header">
+          <span class="ds-section-label">Signals</span>
+        </div>
+        <div id="ds-signals-list">
+          <!-- Populated by popup.js -->
+        </div>
+      </div>
+
+    </div>
+
+    <!-- Analyze Button -->
+    <button class="ds-analyze-btn" id="ds-analyze-btn">Analyze Product</button>
+
+  </main>
+
+  <!-- ============================
+       UNSUPPORTED PAGE STATE
+       ============================ -->
+  <div class="ds-unsupported" id="ds-main-unsupported" style="display:none;">
+    <div class="ds-unsupported-icon">
+      <svg viewBox="0 0 24 24" xmlns="http://www.w3.org/2000/svg">
+        <path d="M12 22C6.477 22 2 17.523 2 12S6.477 2 12 2s10 4.477 10 10-4.477 10-10 10Zm0-2a8 8 0 1 0 0-16 8 8 0 0 0 0 16Zm-1-5h2v2h-2v-2Zm0-8h2v6h-2V7Z"/>
+      </svg>
+    </div>
+    <div class="ds-unsupported-title">Page not supported</div>
+    <div class="ds-unsupported-sub">DealSense works on product pages<br>from supported shopping sites.</div>
+    <div class="ds-supported-sites">
+      <span class="ds-site-chip">Amazon</span>
+      <span class="ds-site-chip">Flipkart</span>
+      <span class="ds-site-chip">eBay</span>
+    </div>
+  </div>
+
+  <footer class="ds-footer">
+    <span class="ds-footer-note">DealSense &mdash; Data Science Project</span>
+    <span class="ds-footer-version">v1.0</span>
+  </footer>
+
+  <script src="popup.js"></script>
+</body>
+</html>
