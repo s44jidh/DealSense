@@ -1,0 +1,439 @@
+/**
+ * DealSense — Content Script
+ * Extracts product details from Amazon India (amazon.in) product pages.
+ */
+
+function extractAmazonProduct() {
+  const hostname = window.location.hostname;
+  if (!hostname.includes("amazon.in")) {
+    return null;
+  }
+
+  // 1. Product Title
+  const titleEl =
+    document.querySelector("#productTitle") ||
+    document.querySelector("#title") ||
+    document.querySelector("meta[property=\"og:title\"]") ||
+    document.querySelector("#item_name");
+
+  let productName = null;
+  if (titleEl) {
+    const rawTitle =
+      titleEl.tagName === "META"
+        ? titleEl.getAttribute("content")
+        : titleEl.textContent;
+    if (rawTitle) {
+      productName = rawTitle.trim().replace(/\s+/g, " ");
+    }
+  }
+
+  if (!productName) {
+    return null;
+  }
+
+  // 2. Selling Price
+  let price = null;
+  const priceSelectors = [
+    ".apexPriceToPay .a-offscreen",
+    ".priceToPay .a-offscreen",
+    "#corePriceDisplay_desktop_feature_div .a-price.aok-align-center .a-offscreen",
+    "#corePrice_desktop .a-price .a-offscreen",
+    "#corePrice_feature_div .a-price .a-offscreen",
+    "#priceblock_ourprice",
+    "#priceblock_dealprice",
+    "#priceblock_saleprice",
+    "#tp_price_block_total_price_ww .a-offscreen",
+    ".a-price .a-offscreen",
+  ];
+
+  for (const selector of priceSelectors) {
+    const el = document.querySelector(selector);
+    if (el && el.textContent) {
+      const parsed = parsePriceText(el.textContent);
+      if (parsed !== null) {
+        price = parsed;
+        break;
+      }
+    }
+  }
+
+  // Fallback: whole + fraction elements
+  if (price === null) {
+    const wholeEl =
+      document.querySelector(".priceToPay .a-price-whole") ||
+      document.querySelector("#corePriceDisplay_desktop_feature_div .a-price-whole") ||
+      document.querySelector(".a-price .a-price-whole");
+    if (wholeEl && wholeEl.textContent) {
+      const whole = wholeEl.textContent.replace(/,/g, "").replace(/[^\d]/g, "");
+      const fractionEl = wholeEl.parentElement
+        ? wholeEl.parentElement.querySelector(".a-price-fraction")
+        : null;
+      const fraction = fractionEl && fractionEl.textContent ? fractionEl.textContent.trim() : "00";
+      const combined = parseFloat(`${whole}.${fraction}`);
+      if (!isNaN(combined) && combined > 0) {
+        price = combined;
+      }
+    }
+  }
+
+  if (price === null) {
+    return null;
+  }
+
+  // 3. MRP (Maximum Retail Price / List Price)
+  const mrp = extractAmazonMrp(document, price);
+
+  // 4. Seller Name
+  let seller = null;
+  const sellerLink = document.querySelector("#sellerProfileTriggerId");
+  if (sellerLink && sellerLink.textContent) {
+    seller = sellerLink.textContent.trim();
+  }
+
+  if (!seller) {
+    const tabularSeller = document.querySelector(
+      "#tabular-buybox [tabular-attribute-name=\"Sold by\"] a, #tabular-buybox [tabular-attribute-name=\"Sold by\"] span"
+    );
+    if (tabularSeller && tabularSeller.textContent) {
+      seller = tabularSeller.textContent.trim();
+    }
+  }
+
+  if (!seller) {
+    const merchantEl = document.querySelector("#merchant-info");
+    if (merchantEl && merchantEl.textContent) {
+      const text = merchantEl.textContent.trim();
+      const match = text.match(
+        /(?:sold by|dispatched from and sold by)\s+([^.\r\n]+?)(?:\s+and\s+(?:fulfilled|delivered|shipped)|$|\.)/i
+      );
+      if (match && match[1]) {
+        seller = match[1].trim();
+      } else {
+        const link = merchantEl.querySelector("a");
+        if (link && link.textContent) {
+          seller = link.textContent.trim();
+        }
+      }
+    }
+  }
+
+  // 5. Product Image
+  const image = extractAmazonImage(document);
+
+  // 6. Product Variant
+  const variant = extractAmazonVariant(document);
+
+  // 7. URL
+  const canonicalEl = document.querySelector("link[rel=\"canonical\"]");
+  const url = (canonicalEl && canonicalEl.getAttribute("href")) || window.location.href;
+
+  return {
+    url,
+    product_name: productName,
+    current_site_price: price,
+    mrp: mrp || null,
+    seller: seller || null,
+    image: image || null,
+    variant: variant || null,
+  };
+}
+
+function extractAmazonVariant(doc) {
+  const parts = [];
+  const twisterDimensionIds = [
+    "color_name",
+    "size_name",
+    "style_name",
+    "configuration",
+    "pattern_name",
+    "item_package_quantity",
+  ];
+
+  // Strategy 1: Modern inline-twister expanded dimension values
+  for (const dim of twisterDimensionIds) {
+    const el = doc.querySelector(`#inline-twister-expanded-dimension-text-${dim}`);
+    if (el && el.textContent) {
+      const val = el.textContent.trim();
+      if (val && !parts.includes(val)) {
+        parts.push(val);
+      }
+    }
+  }
+
+  // Strategy 2: Classic variation labels with .selection or dropdown prompt
+  if (parts.length === 0) {
+    for (const dim of twisterDimensionIds) {
+      const el =
+        doc.querySelector(`#variation_${dim} span.selection`) ||
+        doc.querySelector(`#variation_${dim} .selection`) ||
+        doc.querySelector(`#variation_${dim} .a-dropdown-prompt`);
+      if (el && el.textContent) {
+        const val = el.textContent.trim();
+        if (val && !/^(select|choose|\-)/i.test(val) && !parts.includes(val)) {
+          parts.push(val);
+        }
+      }
+    }
+  }
+
+  // Strategy 3: Dropdown selection options if any
+  for (const dim of twisterDimensionIds) {
+    const selectEl = doc.querySelector(`select[name="dropdown_selected_${dim}"]`);
+    if (selectEl && selectEl.selectedIndex >= 0) {
+      const opt = selectEl.options[selectEl.selectedIndex];
+      if (opt && opt.text) {
+        const val = opt.text.trim();
+        if (val && !/^(select|choose|\-)/i.test(val) && !parts.includes(val)) {
+          parts.push(val);
+        }
+      }
+    }
+  }
+
+  // Strategy 4: Active swatch text
+  if (parts.length === 0) {
+    const swatches = doc.querySelectorAll(".swatches .swatchSelect, ul.a-unordered-list li.swatchSelect");
+    for (const el of Array.from(swatches)) {
+      const textEl = el.querySelector(".a-button-text, .swatch-title-text-color_name");
+      const val = textEl ? textEl.textContent.trim() : null;
+      if (val && !parts.includes(val)) {
+        parts.push(val);
+      }
+    }
+  }
+
+  if (parts.length > 0) {
+    return parts.join(" · ");
+  }
+
+  return null;
+}
+
+function extractAmazonImage(doc) {
+  const candidateSelectors = [
+    "#landingImage",
+    "#imgBlkFront",
+    "#ebooks-img-blk-front",
+    "#main-image",
+    "#main-image-container img",
+    "#imgTagWrapperId img",
+  ];
+
+  for (const selector of candidateSelectors) {
+    const imgEl = doc.querySelector(selector);
+    if (imgEl) {
+      // 1. High-resolution image via data-old-hires
+      const hires = imgEl.getAttribute("data-old-hires");
+      if (hires && isValidImageUrl(hires)) {
+        return hires.trim();
+      }
+
+      // 2. High-resolution image via data-a-dynamic-image
+      const dynamic = imgEl.getAttribute("data-a-dynamic-image");
+      if (dynamic) {
+        try {
+          const parsed = JSON.parse(dynamic);
+          const urls = Object.keys(parsed);
+          if (urls.length > 0) {
+            urls.sort((a, b) => {
+              const dimA = Array.isArray(parsed[a]) ? parsed[a][0] * parsed[a][1] : 0;
+              const dimB = Array.isArray(parsed[b]) ? parsed[b][0] * parsed[b][1] : 0;
+              return dimB - dimA;
+            });
+            if (isValidImageUrl(urls[0])) {
+              return urls[0].trim();
+            }
+          }
+        } catch {
+          // ignore JSON parse error
+        }
+      }
+
+      // 3. Fallback to src attribute
+      const src = imgEl.getAttribute("src");
+      if (src && isValidImageUrl(src)) {
+        return src.trim();
+      }
+    }
+  }
+
+  // 4. OpenGraph image fallback
+  const ogImage = doc.querySelector('meta[property="og:image"]')?.getAttribute("content");
+  if (ogImage && isValidImageUrl(ogImage)) {
+    return ogImage.trim();
+  }
+
+  return null;
+}
+
+function isValidImageUrl(url) {
+  if (!url || typeof url !== "string") return false;
+  const trimmed = url.trim();
+  if (!trimmed.startsWith("http://") && !trimmed.startsWith("https://")) return false;
+  if (trimmed.includes("transparent-pixel") || trimmed.includes("grey-pixel")) return false;
+  return true;
+}
+
+function extractAmazonMrp(doc, sellingPrice) {
+  const candidateContainers = [
+    doc.querySelector("#corePriceDisplay_desktop_feature_div"),
+    doc.querySelector("#corePrice_desktop"),
+    doc.querySelector("#corePrice_feature_div"),
+    doc.querySelector("#apex_desktop"),
+    doc.querySelector("#desktop_unifiedPrice"),
+    doc.querySelector("#price"),
+  ].filter(Boolean);
+
+  // Strategy 1: Check .basisPrice containers (modern Amazon desktop MRP)
+  for (const container of candidateContainers) {
+    const basisEls = container.querySelectorAll(".basisPrice, [data-csa-c-element-id*='basisPrice']");
+    for (const basisEl of basisEls) {
+      const text = basisEl.textContent || "";
+      if (!/save|coupon|emi|cashback/i.test(text)) {
+        const offscreen = basisEl.querySelector(".a-offscreen") || basisEl.querySelector(".a-text-price");
+        const val = parsePriceText(offscreen ? offscreen.textContent : text);
+        if (val !== null && (!sellingPrice || val >= sellingPrice)) {
+          return val;
+        }
+      }
+    }
+  }
+
+  // Strategy 2: Strike-through price elements labelled with M.R.P. or List Price
+  for (const container of candidateContainers) {
+    const strikeEls = container.querySelectorAll(
+      'span.a-text-price[data-a-strike="true"], span.a-price.a-text-price, span.a-text-strike'
+    );
+    for (const strikeEl of strikeEls) {
+      const parent = strikeEl.closest("tr, div, span.a-size-small, li");
+      const context = (parent ? parent.textContent : strikeEl.parentElement?.textContent) || "";
+      const isMrp = /m\.?r\.?p|list\s*price|maximum\s*retail/i.test(context);
+      const isExcluded = /save|savings|coupon|emi|cashback|discount/i.test(context);
+
+      if (isMrp && !isExcluded) {
+        const offscreen = strikeEl.querySelector(".a-offscreen") || strikeEl;
+        const val = parsePriceText(offscreen.textContent);
+        if (val !== null && (!sellingPrice || val >= sellingPrice)) {
+          return val;
+        }
+      }
+    }
+  }
+
+  // Strategy 3: Price table rows labelled with M.R.P.
+  for (const container of candidateContainers) {
+    const rows = container.querySelectorAll("tr");
+    for (const row of rows) {
+      const firstCol = row.querySelector("td, th");
+      const firstText = firstCol ? firstCol.textContent || "" : "";
+      if (/m\.?r\.?p|list\s*price/i.test(firstText)) {
+        const valCol = row.querySelector("td:last-child") || row;
+        const priceEl = valCol.querySelector(".a-offscreen") || valCol.querySelector(".a-text-strike") || valCol;
+        const val = parsePriceText(priceEl.textContent);
+        if (val !== null && (!sellingPrice || val >= sellingPrice)) {
+          return val;
+        }
+      }
+    }
+  }
+
+  // Strategy 4: Legacy priceblock_listprice
+  const legacyEl = doc.querySelector("#priceblock_listprice, span#priceblock_listprice, #listPrice");
+  if (legacyEl && legacyEl.textContent) {
+    const val = parsePriceText(legacyEl.textContent);
+    if (val !== null && (!sellingPrice || val >= sellingPrice)) {
+      return val;
+    }
+  }
+
+  // Strategy 5: Core price container strike price fallback
+  const primaryDisplay = doc.querySelector("#corePriceDisplay_desktop_feature_div");
+  if (primaryDisplay) {
+    const strikeSpan = primaryDisplay.querySelector('span.a-text-price[data-a-strike="true"] .a-offscreen');
+    if (strikeSpan && strikeSpan.textContent) {
+      const val = parsePriceText(strikeSpan.textContent);
+      if (val !== null && (!sellingPrice || val >= sellingPrice)) {
+        return val;
+      }
+    }
+  }
+
+  return null;
+}
+
+function parsePriceText(text) {
+  if (!text) return null;
+  const cleaned = text.replace(/,/g, "").replace(/[^\d.]/g, " ").trim();
+  const match = cleaned.match(/\d+(?:\.\d+)?/);
+  if (!match) return null;
+  const num = parseFloat(match[0]);
+  return isNaN(num) || num <= 0 ? null : num;
+}
+
+// Listen for extraction requests from popup
+if (typeof chrome !== "undefined" && chrome.runtime && chrome.runtime.onMessage) {
+  chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
+    if (request && request.action === "extractProduct") {
+      try {
+        const product = extractAmazonProduct();
+        sendResponse({ success: true, data: product });
+      } catch (err) {
+        sendResponse({ success: false, error: String(err) });
+      }
+    }
+    return true;
+  });
+}
+
+
+// Targeted DOM observation and SPA navigation listener for automatic variant detection
+let lastSentIdentity = null;
+let debounceTimer = null;
+
+function checkAndNotifyProductUpdate() {
+  if (debounceTimer) {
+    clearTimeout(debounceTimer);
+  }
+  debounceTimer = setTimeout(() => {
+    try {
+      const prod = extractAmazonProduct();
+      if (!prod) return;
+      const ident = `${window.location.pathname}::${prod.product_name}::${prod.current_site_price}::${prod.variant || ""}`;
+      if (ident !== lastSentIdentity) {
+        lastSentIdentity = ident;
+        if (typeof chrome !== "undefined" && chrome.runtime && chrome.runtime.sendMessage) {
+          chrome.runtime.sendMessage({ action: "productUpdated", data: prod }, () => {
+            if (chrome.runtime.lastError) {
+              // Popup may not be open, harmless
+            }
+          });
+        }
+      }
+    } catch (e) {
+      // ignore
+    }
+  }, 500);
+}
+
+// Observe variant selection containers if present
+if (typeof MutationObserver !== "undefined") {
+  const targetContainers = [
+    document.querySelector("#twister"),
+    document.querySelector("#twisterContainer"),
+    document.querySelector("#corePriceDisplay_desktop_feature_div"),
+    document.querySelector("#corePrice_desktop"),
+    document.querySelector("#title_feature_div"),
+  ].filter(Boolean);
+
+  if (targetContainers.length > 0) {
+    const observer = new MutationObserver(() => {
+      checkAndNotifyProductUpdate();
+    });
+    for (const c of targetContainers) {
+      observer.observe(c, { childList: true, subtree: true, characterData: true });
+    }
+  }
+}
+
+window.addEventListener("popstate", checkAndNotifyProductUpdate);
+window.addEventListener("hashchange", checkAndNotifyProductUpdate);

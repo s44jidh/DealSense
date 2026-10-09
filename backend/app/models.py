@@ -1,56 +1,114 @@
 """
 DealSense API — models.py
 Pydantic request and response models for all endpoints.
+Includes deterministic listing price analysis and genuine cross-store price comparison.
 """
 
 from __future__ import annotations
 
-from typing import Optional
+import urllib.parse
+from enum import Enum
+from typing import Any, Optional
 
-from pydantic import BaseModel, HttpUrl, field_validator
+from pydantic import BaseModel, Field, field_validator
+
+
+# ---------------------------------------------------------------------------
+# Phase 2 — Listing Price Analysis Models
+# ---------------------------------------------------------------------------
 
 
 class AnalyzeRequest(BaseModel):
     """
     Payload sent by the client (browser extension or test tool) to
     POST /api/analyze.
-
-    Fields
-    ------
-    url : str
-        Full URL of the product page being analysed.
-    product_name : str
-        Human-readable product title as it appears on the listing.
-    current_site_price : float
-        The price currently displayed on the retailer's product page,
-        before any calculated discount/offer adjustments.
-    seller : str | None
-        Seller name as shown on the listing, or null if unavailable.
     """
 
     url: str
     product_name: str
     current_site_price: float
+    mrp: Optional[float] = None
     seller: Optional[str] = None
+    variant: Optional[str] = None
 
     @field_validator("current_site_price")
     @classmethod
-    def price_must_be_positive(cls, v: float) -> float:
-        if v < 0:
-            raise ValueError("current_site_price must be a non-negative number")
+    def price_must_be_strictly_positive(cls, v: float) -> float:
+        if v <= 0:
+            raise ValueError("current_site_price must be greater than zero")
         return v
+
+    @field_validator("mrp")
+    @classmethod
+    def validate_mrp(cls, v: Optional[float]) -> Optional[float]:
+        if v is not None and v <= 0:
+            return None
+        return v
+
+
+class PriceAnalysis(BaseModel):
+    """
+    Deterministic evaluation of the listing's selling price against MRP.
+    """
+
+    status: str  # "DISCOUNT_VERIFIED" | "LISTED_AT_MRP" | "PRICE_EXCEEDS_MRP" | "MRP_UNAVAILABLE"
+    selling_price: float
+    mrp: Optional[float] = None
+    discount_amount: Optional[float] = None
+    discount_percent: Optional[float] = None
+    verdict_label: str
+    summary: str
+
+
+class SellerAnalysis(BaseModel):
+    """
+    Evaluation of seller credentials. Explicitly marked unverified.
+    """
+
+    status: str = "UNVERIFIED"
+    seller: Optional[str] = None
+    summary: str = (
+        "Seller identity extracted from page; reputation and credibility are unverified."
+    )
+
+
+class ReviewsAnalysis(BaseModel):
+    """
+    Evaluation of review sentiment/authenticity. Explicitly marked unverified.
+    """
+
+    status: str = "UNVERIFIED"
+    summary: str = (
+        "Review sentiment and authenticity analysis are not yet supported for live listings."
+    )
+
+
+class MarketComparison(BaseModel):
+    """
+    Multi-store comparison status summary inside AnalyzeResponse.
+    """
+
+    status: str = "ACTIVE"
+    summary: str = (
+        "Cross-store price comparison is active. Use POST /api/compare-prices for live competitor offer analysis."
+    )
 
 
 class AnalyzeResponse(BaseModel):
     """
-    Response returned by POST /api/analyze.
+    Response returned by POST /api/analyze containing deterministic price analysis.
     """
 
     status: str
     product_name: str
     current_site_price: float
-    seller: Optional[str]
+    mrp: Optional[float] = None
+    seller: Optional[str] = None
     url: str
+    price_analysis: PriceAnalysis
+    seller_analysis: SellerAnalysis
+    reviews_analysis: ReviewsAnalysis
+    market_comparison: MarketComparison
     message: str
 
 
@@ -61,3 +119,158 @@ class HealthResponse(BaseModel):
 
     status: str
     service: str
+
+
+# ---------------------------------------------------------------------------
+# Phase 3 — Genuine Cross-Store Price Comparison Models
+# ---------------------------------------------------------------------------
+
+
+class MatchStatus(str, Enum):
+    EXACT_MATCH = "EXACT_MATCH"
+    UNVERIFIED_VARIANT = "UNVERIFIED_VARIANT"
+    PROBABLE_MATCH = "PROBABLE_MATCH"
+    UNCERTAIN_MATCH = "UNCERTAIN_MATCH"
+    MISMATCH = "MISMATCH"
+
+
+class ComparableOffer(BaseModel):
+    """
+    Structured offer retrieved from a supported e-commerce retailer.
+    """
+
+    retailer_name: str
+    product_title: str
+    product_url: str
+    current_price: float
+    mrp: Optional[float] = None
+    currency: str = "INR"
+    match_status: str  # EXACT_MATCH, UNVERIFIED_VARIANT, PROBABLE_MATCH, UNCERTAIN_MATCH, MISMATCH
+    match_details: Optional[str] = None
+    rejection_category: Optional[str] = None
+    retrieval_timestamp: str
+    availability: Optional[str] = "IN_STOCK"
+    shipping_cost: Optional[float] = None
+    model_identifier: Optional[str] = None
+    configuration: Optional[str] = None
+    extracted_variants: Optional[dict[str, Any]] = None
+
+    @field_validator("current_price")
+    @classmethod
+    def price_must_be_strictly_positive(cls, v: float) -> float:
+        if v <= 0:
+            raise ValueError("current_price must be greater than zero")
+        return round(v, 2)
+
+    @field_validator("mrp")
+    @classmethod
+    def validate_mrp(cls, v: Optional[float]) -> Optional[float]:
+        if v is not None and v <= 0:
+            return None
+        return round(v, 2) if v is not None else None
+
+    @field_validator("product_url")
+    @classmethod
+    def validate_allowed_url(cls, v: str) -> str:
+        parsed = urllib.parse.urlparse(v)
+        if parsed.scheme not in ("http", "https") or not parsed.netloc:
+            raise ValueError("product_url must be a valid HTTP/HTTPS URL")
+
+        allowed_domains = (
+            "flipkart.com",
+            "croma.com",
+            "reliancedigital.in",
+            "vijaysales.com",
+            "tatacliq.com",
+            "amazon.in",
+        )
+        host = parsed.netloc.lower()
+        if ":" in host:
+            host = host.split(":")[0]
+        if not any(host == d or host.endswith("." + d) for d in allowed_domains):
+            raise ValueError(
+                f"product_url domain '{host}' is not in the supported retailer allowlist"
+            )
+        return v
+
+
+class SourceProductSummary(BaseModel):
+    """
+    Details of the source product being compared.
+    """
+
+    product_name: str
+    current_site_price: float
+    mrp: Optional[float] = None
+    url: str
+    variant: Optional[str] = None
+
+
+class ComparePricesRequest(BaseModel):
+    """
+    Payload sent to POST /api/compare-prices.
+    """
+
+    url: str
+    product_name: str
+    current_site_price: float
+    mrp: Optional[float] = None
+    seller: Optional[str] = None
+    variant: Optional[str] = None
+
+    @field_validator("current_site_price")
+    @classmethod
+    def price_must_be_strictly_positive(cls, v: float) -> float:
+        if v <= 0:
+            raise ValueError("current_site_price must be greater than zero")
+        return round(v, 2)
+
+    @field_validator("mrp")
+    @classmethod
+    def validate_mrp(cls, v: Optional[float]) -> Optional[float]:
+        if v is not None and v <= 0:
+            return None
+        return round(v, 2) if v is not None else None
+
+
+class RetailerDiagnostic(BaseModel):
+    """
+    Structured diagnostic details for a single queried retailer search.
+    """
+    retailer_name: str
+    search_query: str
+    http_status: Optional[int] = None
+    status_reason: str
+    raw_listings_count: int = 0
+    parsed_listings_count: int = 0
+    valid_price_count: int = 0
+    price_failed_count: int = 0
+    model_mismatch_count: int = 0
+    config_mismatch_count: int = 0
+    unverified_variant_count: int = 0
+    condition_mismatch_count: int = 0
+    exact_matches_count: int = 0
+    rejection_breakdown: dict[str, int] = Field(default_factory=dict)
+
+
+class ComparePricesResponse(BaseModel):
+    """
+    Response returned by POST /api/compare-prices.
+    """
+
+    status: str  # "success" | "no_offers_found" | "error"
+    source_product: SourceProductSummary
+    offers: list[ComparableOffer]
+    verified_offers: list[ComparableOffer]
+    lowest_price: Optional[float] = None
+    lowest_price_retailer: Optional[str] = None
+    lowest_price_url: Optional[str] = None
+    price_difference: Optional[float] = None
+    verdict_label: str
+    summary: str
+    retrieval_timestamp: str
+    retailers_queried: list[str]
+    retailer_statuses: dict[str, str]
+    retailer_diagnostics: list[RetailerDiagnostic] = Field(default_factory=list)
+    diagnostics: Optional[dict[str, Any]] = None
+    message: str
