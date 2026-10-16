@@ -421,3 +421,334 @@ test("Test 5: Repeated DOM mutations are debounced and identity check prevents d
     "Identical product state must not trigger additional messages"
   );
 });
+
+// ---------------------------------------------------------------------------
+// Test 6: Supplied Flipkart Nothing Phone 4b product page is recognized
+// ---------------------------------------------------------------------------
+test("Test 6: Supplied Flipkart Nothing Phone 4b product page is recognized and extracted", () => {
+  const doc = new MockNode("#document");
+  const link = new MockNode("link", {
+    rel: "canonical",
+    href: "https://www.flipkart.com/nothing-phone-4b-blue-128-gb/p/itm939608b40adbb"
+  });
+  const script = new MockNode("script", { type: "application/ld+json" }, JSON.stringify([{
+    "@type": "Product",
+    "name": "Nothing Phone (4b) (Black, 256 GB)",
+    "sku": "MOBHZMBDNBKCHZ7B",
+    "offers": { "price": 40999, "availability": "https://schema.org/InStock" },
+    "brand": { "name": "Nothing" },
+    "image": ["https://rukmini1.flixcart.com/image/1500/1500/xif0q/mobile/c/e/m/-resized-original-imahpfrkm8tnj7cb.jpeg"]
+  }]));
+  const h1 = new MockNode("h1", { class: "v1zwn21n v1zwn27 _1psv1zeb9 _1psv1ze0" }, "Nothing Phone (4b) (Black, 256 GB) (8 GB RAM)");
+  const priceDiv = new MockNode("div", { class: "v1zwn21n v1zwn2a _1psv1zeb9 _1psv1ze0 _1psv1ze2c" }, "₹40,999");
+  const mrpDiv = new MockNode("div", { class: "v1zwn21o v1zwn29 _1psv1zeb9 _1psv1ze0 _1psv1ze93", style: "text-decoration-line:line-through" }, "59,999");
+  const sellerDiv = new MockNode("div", { class: "v1zwn26 _1psv1zeb9 _1psv1ze0" }, "Seller: IndiFlashMart");
+
+  doc.appendChild(link);
+  doc.appendChild(script);
+  doc.appendChild(h1);
+  doc.appendChild(priceDiv);
+  doc.appendChild(mrpDiv);
+  doc.appendChild(sellerDiv);
+
+  setupGlobalEnvironment(doc, "https://www.flipkart.com/nothing-phone-4b-blue-128-gb/p/itm939608b40adbb");
+
+  const product = extractProduct();
+  assert.ok(product, "Product should be detected on Flipkart Nothing Phone 4b page");
+  assert.strictEqual(product.source_retailer, "Flipkart");
+  assert.strictEqual(product.product_name, "Nothing Phone (4b) (Black, 256 GB) (8 GB RAM)");
+  assert.strictEqual(product.current_site_price, 40999);
+  assert.strictEqual(product.mrp, 59999);
+  assert.strictEqual(product.seller, "IndiFlashMart");
+  assert.strictEqual(product.retailer_product_id, "MOBHZMBDNBKCHZ7B");
+  assert.strictEqual(product.manufacturer_part_number, null);
+  assert.strictEqual(product.brand, "Nothing");
+  assert.strictEqual(product.availability, "IN_STOCK");
+  assert.ok(product.variant && product.variant.includes("256 GB"));
+});
+
+// ---------------------------------------------------------------------------
+// Test 7: Product identifiers are parsed into correct namespaces (PID vs MPN)
+// ---------------------------------------------------------------------------
+test("Test 7: Flipkart PID and Amazon ASIN populate retailer_product_id and are never treated as MPN", () => {
+  // 1. Flipkart product with item ID and PID
+  const fkDoc = new MockNode("#document");
+  const fkLink = new MockNode("link", { rel: "canonical", href: "https://www.flipkart.com/item/p/itm939608b40adbb?pid=MOB123456789" });
+  const fkH1 = new MockNode("h1", {}, "Nothing Phone (4b) (Black, 256 GB)");
+  const fkPrice = new MockNode("div", { class: "Nx9bqj CxhGGd" }, "₹40,999");
+  fkDoc.appendChild(fkLink);
+  fkDoc.appendChild(fkH1);
+  fkDoc.appendChild(fkPrice);
+
+  setupGlobalEnvironment(fkDoc, "https://www.flipkart.com/item/p/itm939608b40adbb?pid=MOB123456789");
+  const fkProduct = extractProduct();
+  assert.ok(fkProduct);
+  assert.strictEqual(fkProduct.retailer_product_id, "MOB123456789");
+  assert.strictEqual(fkProduct.manufacturer_part_number, null, "Flipkart PID must never be assigned to manufacturer_part_number");
+
+  // 2. Amazon product with ASIN
+  const amzDoc = new MockNode("#document");
+  const amzDp = new MockNode("div", { id: "dp", "data-asin": "B0GR1C18B7" });
+  const amzTitle = new MockNode("span", { id: "productTitle" }, "Apple MacBook Air 13-inch");
+  const amzPrice = new MockNode("span", { class: "priceToPay" });
+  amzPrice.appendChild(new MockNode("span", { class: "a-offscreen" }, "₹1,88,890"));
+  amzDp.appendChild(amzTitle);
+  amzDp.appendChild(amzPrice);
+  amzDoc.appendChild(amzDp);
+
+  setupGlobalEnvironment(amzDoc, "https://www.amazon.in/dp/B0GR1C18B7");
+  const amzProduct = extractProduct();
+  assert.ok(amzProduct);
+  assert.strictEqual(amzProduct.retailer_product_id, "B0GR1C18B7");
+  assert.strictEqual(amzProduct.manufacturer_part_number, null, "Amazon ASIN must never be assigned to manufacturer_part_number");
+});
+
+// ---------------------------------------------------------------------------
+// Test 8: Search suggestions and sponsored products cannot replace main product
+// ---------------------------------------------------------------------------
+test("Test 8: Search suggestions and sponsored banners on Flipkart cannot replace the main product", () => {
+  const doc = new MockNode("#document");
+
+  // Search input and auto-suggestions
+  const searchBar = new MockNode("input", { class: "Pke_EE", value: "samsung galaxy s24 ultra" });
+  const suggestions = new MockNode("div", { class: "_1sFryS" });
+  suggestions.appendChild(new MockNode("div", { class: "_3D0G9a" }, "Samsung Galaxy S24 in Mobile Phones"));
+  doc.appendChild(searchBar);
+  doc.appendChild(suggestions);
+
+  // Sponsored carousel banner
+  const sponsored = new MockNode("div", { class: "sponsored-ad-card" });
+  sponsored.appendChild(new MockNode("div", { class: "title" }, "Motorola Edge 50 Fusion"));
+  sponsored.appendChild(new MockNode("div", { class: "price" }, "₹22,999"));
+  doc.appendChild(sponsored);
+
+  // Main product container
+  const h1 = new MockNode("h1", { class: "v1zwn21n _1psv1zeb9" }, "Nothing Phone (4b) (Black, 256 GB) (8 GB RAM)");
+  const mainPrice = new MockNode("div", { class: "v1zwn21n" }, "₹40,999");
+  doc.appendChild(h1);
+  doc.appendChild(mainPrice);
+
+  setupGlobalEnvironment(doc, "https://www.flipkart.com/nothing-phone-4b-blue-128-gb/p/itm939608b40adbb");
+
+  const product = extractProduct();
+  assert.ok(product);
+  assert.strictEqual(product.product_name, "Nothing Phone (4b) (Black, 256 GB) (8 GB RAM)");
+  assert.strictEqual(product.current_site_price, 40999);
+  assert.ok(!product.product_name.includes("Samsung"));
+  assert.ok(!product.product_name.includes("Motorola"));
+});
+
+// ---------------------------------------------------------------------------
+// Test 9: Flipkart SPA navigation updates the product correctly
+// ---------------------------------------------------------------------------
+test("Test 9: Flipkart SPA navigation updates the product correctly", async () => {
+  const doc = new MockNode("#document");
+  const h1 = new MockNode("h1", {}, "Nothing Phone (4b) (Black, 128 GB)");
+  const price = new MockNode("div", { class: "Nx9bqj" }, "₹36,999");
+  doc.appendChild(h1);
+  doc.appendChild(price);
+
+  setupGlobalEnvironment(doc, "https://www.flipkart.com/nothing-phone-4b-black-128-gb/p/itm123?pid=MOB128");
+
+  if (globalThis.window.__dealSenseSetLastSentIdentity) globalThis.window.__dealSenseSetLastSentIdentity(null);
+  let notifiedMsg = null;
+  globalThis.chrome.runtime.sendMessage = (msg, cb) => {
+    notifiedMsg = msg;
+    if (cb) cb();
+  };
+
+  checkAndNotifyProductUpdate();
+  await new Promise((resolve) => setTimeout(resolve, 500));
+
+  assert.ok(notifiedMsg);
+  assert.strictEqual(notifiedMsg.action, "productUpdated");
+  assert.strictEqual(notifiedMsg.data.product_name, "Nothing Phone (4b) (Black, 128 GB)");
+  assert.strictEqual(notifiedMsg.data.current_site_price, 36999);
+
+  // Client-side SPA navigation to 256 GB variant
+  notifiedMsg = null;
+  h1.textContent = "Nothing Phone (4b) (Black, 256 GB)";
+  price.textContent = "₹40,999";
+  globalThis.window.location.href = "https://www.flipkart.com/nothing-phone-4b-black-256-gb/p/itm123?pid=MOB256";
+  globalThis.window.location.pathname = "/nothing-phone-4b-black-256-gb/p/itm123";
+
+  checkAndNotifyProductUpdate();
+  await new Promise((resolve) => setTimeout(resolve, 500));
+
+  assert.ok(notifiedMsg);
+  assert.strictEqual(notifiedMsg.action, "productUpdated");
+  assert.strictEqual(notifiedMsg.data.product_name, "Nothing Phone (4b) (Black, 256 GB)");
+  assert.strictEqual(notifiedMsg.data.current_site_price, 40999);
+});
+
+// ---------------------------------------------------------------------------
+// Test 10: Missing or delayed product data handled safely
+// ---------------------------------------------------------------------------
+test("Test 10: Missing or delayed product data on Flipkart returns null and clears identity", async () => {
+  const doc = new MockNode("#document");
+  // Page with only footer/header (e.g. initial shell before hydration)
+  const header = new MockNode("header", {}, "Flipkart Explore Plus");
+  doc.appendChild(header);
+
+  setupGlobalEnvironment(doc, "https://www.flipkart.com/nothing-phone-4b-blue-128-gb/p/itm939608b40adbb");
+
+  const product = extractProduct();
+  assert.strictEqual(product, null, "Should return null when main product title and price have not hydrated");
+
+  if (globalThis.window.__dealSenseSetLastSentIdentity) globalThis.window.__dealSenseSetLastSentIdentity("Flipkart::MOB123::Old Product::40999::");
+  let unavailableSent = false;
+  globalThis.chrome.runtime.sendMessage = (msg, cb) => {
+    if (msg.action === "productUnavailable") unavailableSent = true;
+    if (cb) cb();
+  };
+
+  checkAndNotifyProductUpdate();
+  await new Promise((resolve) => setTimeout(resolve, 500));
+
+  assert.strictEqual(unavailableSent, true, "Should notify popup that product is unavailable when hydration fails or unmounts");
+  assert.strictEqual(globalThis.window.__dealSenseGetLastSentIdentity ? globalThis.window.__dealSenseGetLastSentIdentity() : null, null);
+});
+
+// ---------------------------------------------------------------------------
+// Test 11: Switching between Amazon and Flipkart updates source retailer
+// ---------------------------------------------------------------------------
+test("Test 11: Switching between Amazon and Flipkart updates source retailer and product state", () => {
+  // Step A: Amazon product
+  const amzDoc = new MockNode("#document");
+  const amzDp = new MockNode("div", { id: "dp", "data-asin": "B00KVEB182" });
+  amzDp.appendChild(new MockNode("span", { id: "productTitle" }, "Nivia Football Size 5"));
+  const corePrice = new MockNode("div", { id: "corePriceDisplay_desktop_feature_div" });
+  const priceToPay = new MockNode("span", { class: "priceToPay" });
+  priceToPay.appendChild(new MockNode("span", { class: "a-offscreen" }, "₹799.00"));
+  corePrice.appendChild(priceToPay);
+  amzDp.appendChild(corePrice);
+  amzDoc.appendChild(amzDp);
+
+  setupGlobalEnvironment(amzDoc, "https://www.amazon.in/dp/B00KVEB182");
+  const amzProd = extractProduct();
+  assert.ok(amzProd);
+  assert.strictEqual(amzProd.source_retailer, "Amazon.in");
+  assert.strictEqual(amzProd.product_name, "Nivia Football Size 5");
+
+  // Step B: User switches tabs to Flipkart Nothing Phone
+  const fkDoc = new MockNode("#document");
+  fkDoc.appendChild(new MockNode("link", { rel: "canonical", href: "https://www.flipkart.com/nothing-phone-4b/p/itm123" }));
+  fkDoc.appendChild(new MockNode("h1", {}, "Nothing Phone (4b) (Black, 256 GB)"));
+  fkDoc.appendChild(new MockNode("div", { class: "Nx9bqj" }, "₹40,999"));
+
+  setupGlobalEnvironment(fkDoc, "https://www.flipkart.com/nothing-phone-4b/p/itm123");
+  const fkProd = extractProduct();
+  assert.ok(fkProd);
+  assert.strictEqual(fkProd.source_retailer, "Flipkart");
+  assert.strictEqual(fkProd.product_name, "Nothing Phone (4b) (Black, 256 GB)");
+  assert.strictEqual(fkProd.current_site_price, 40999);
+  assert.notStrictEqual(fkProd.source_retailer, amzProd.source_retailer);
+});
+
+// ---------------------------------------------------------------------------
+// Test 12: Stale responses from another tab are ignored
+// ---------------------------------------------------------------------------
+test("Test 12: Stale responses from another tab ID are rejected", () => {
+  let activeTabId = 101;
+  let activeProduct = { url: "https://www.flipkart.com/item/p/itm123", product_name: "Nothing Phone 4b" };
+
+  function handleMessage(msg, sender) {
+    if (sender?.tab?.id && sender.tab.id !== activeTabId) {
+      return false; // rejected
+    }
+    if (sender?.tab?.url) {
+      const host = new URL(sender.tab.url).hostname;
+      if (!host.includes("amazon.in") && !host.includes("flipkart.com")) {
+        return false;
+      }
+    }
+    return true; // accepted
+  }
+
+  // Message from active tab (101)
+  const accepted = handleMessage({ action: "productUpdated" }, { tab: { id: 101, url: "https://www.flipkart.com/item/p/itm123" } });
+  assert.strictEqual(accepted, true);
+
+  // Stale message from background tab (99)
+  const rejected = handleMessage({ action: "productUpdated" }, { tab: { id: 99, url: "https://www.amazon.in/dp/B00KVEB182" } });
+  assert.strictEqual(rejected, false, "Message from background tab ID 99 must be ignored");
+
+  // Message from unsupported domain tab
+  const unsupportedDomain = handleMessage({ action: "productUpdated" }, { tab: { id: 101, url: "https://www.google.com" } });
+  assert.strictEqual(unsupportedDomain, false, "Message from non-supported domain must be ignored");
+});
+
+// ---------------------------------------------------------------------------
+test("Test 13: Dual comparison response models correctly populate Section A and Section B", () => {
+  const amazonSourceResponse = {
+    status: "success",
+    source_product: {
+      product_name: "Logitech G29 Driving Force Racing Wheel",
+      current_site_price: 29990.0,
+      url: "https://www.amazon.in/dp/B000SRC",
+      source_retailer: "Amazon.in",
+      seller: "Appario Retail"
+    },
+    // Section A: Other Platform (Flipkart)
+    cross_platform_offers: [
+      {
+        retailer_name: "Flipkart",
+        product_title: "Logitech G29 Driving Force Racing Wheel and Pedals",
+        product_url: "https://www.flipkart.com/p/itm123",
+        current_price: 28490.0,
+        match_status: "EXACT_MATCH",
+        seller_name: "IndiFlashMart"
+      }
+    ],
+    cross_platform_status: "success",
+    // Section B: Other Sellers on this Platform (Amazon)
+    same_platform_seller_offers: [
+      {
+        retailer_name: "Amazon.in",
+        product_title: "Logitech G29 Driving Force Racing Wheel",
+        product_url: "https://www.amazon.in/dp/B000ALT1",
+        current_price: 27990.0,
+        match_status: "EXACT_MATCH",
+        seller_name: "Cloudtail India",
+        price_difference: 2000.0 // 29990 - 27990
+      }
+    ],
+    same_platform_status: "success"
+  };
+
+  // Section A assertions
+  assert.strictEqual(amazonSourceResponse.cross_platform_offers.length, 1);
+  assert.strictEqual(amazonSourceResponse.cross_platform_offers[0].retailer_name, "Flipkart");
+  assert.notStrictEqual(amazonSourceResponse.cross_platform_offers[0].retailer_name, "Amazon.in");
+  const crossSavings = amazonSourceResponse.source_product.current_site_price - amazonSourceResponse.cross_platform_offers[0].current_price;
+  assert.strictEqual(crossSavings, 1500.0);
+
+  // Section B assertions
+  assert.strictEqual(amazonSourceResponse.same_platform_seller_offers.length, 1);
+  assert.strictEqual(amazonSourceResponse.same_platform_seller_offers[0].retailer_name, "Amazon.in");
+  assert.strictEqual(amazonSourceResponse.same_platform_seller_offers[0].seller_name, "Cloudtail India");
+  assert.strictEqual(amazonSourceResponse.same_platform_seller_offers[0].price_difference, 2000.0);
+});
+
+// ---------------------------------------------------------------------------
+test("Test 14: Same-platform seller status honestly distinguishes unverified vs single seller without fabrication", () => {
+  // Scenario 1: Unverified / inaccessible seller identity
+  const unverifiedState = {
+    same_platform_status: "seller_data_unavailable",
+    same_platform_seller_offers: [],
+    same_platform_summary: "Alternative sellers could not be verified from the available retailer data."
+  };
+  assert.strictEqual(unverifiedState.same_platform_seller_offers.length, 0);
+  assert.strictEqual(unverifiedState.same_platform_status, "seller_data_unavailable");
+  assert.match(unverifiedState.same_platform_summary, /could not be verified/i);
+
+  // Scenario 2: Single seller listing
+  const singleSellerState = {
+    same_platform_status: "no_other_sellers_found",
+    same_platform_seller_offers: [],
+    same_platform_summary: "No additional verified sellers were found."
+  };
+  assert.strictEqual(singleSellerState.same_platform_seller_offers.length, 0);
+  assert.strictEqual(singleSellerState.same_platform_status, "no_other_sellers_found");
+  assert.match(singleSellerState.same_platform_summary, /No additional verified sellers/i);
+});

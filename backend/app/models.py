@@ -10,7 +10,7 @@ import urllib.parse
 from enum import Enum
 from typing import Any, Optional
 
-from pydantic import BaseModel, Field, field_validator
+from pydantic import BaseModel, Field, field_validator, model_validator
 
 
 # ---------------------------------------------------------------------------
@@ -21,7 +21,7 @@ from pydantic import BaseModel, Field, field_validator
 class AnalyzeRequest(BaseModel):
     """
     Payload sent by the client (browser extension or test tool) to
-    POST /api/analyze.
+    POST /api/analyze. Supports shared product interface fields and aliases.
     """
 
     url: str
@@ -30,6 +30,46 @@ class AnalyzeRequest(BaseModel):
     mrp: Optional[float] = None
     seller: Optional[str] = None
     variant: Optional[str] = None
+
+    # Universal shared fields
+    source_retailer: Optional[str] = None
+    product_title: Optional[str] = None
+    product_url: Optional[str] = None
+    current_price: Optional[float] = None
+    retailer_product_id: Optional[str] = None
+    manufacturer_part_number: Optional[str] = None
+    brand: Optional[str] = None
+    model: Optional[str] = None
+    category: Optional[str] = None
+    specifications: Optional[dict[str, Any]] = None
+    availability: Optional[str] = None
+    image: Optional[str] = None
+    image_url: Optional[str] = None
+
+    @model_validator(mode="before")
+    @classmethod
+    def populate_aliases(cls, data: Any) -> Any:
+        if isinstance(data, dict):
+            if "url" not in data and "product_url" in data:
+                data["url"] = data["product_url"]
+            elif "product_url" not in data and "url" in data:
+                data["product_url"] = data["url"]
+
+            if "product_name" not in data and "product_title" in data:
+                data["product_name"] = data["product_title"]
+            elif "product_title" not in data and "product_name" in data:
+                data["product_title"] = data["product_name"]
+
+            if "current_site_price" not in data and "current_price" in data:
+                data["current_site_price"] = data["current_price"]
+            elif "current_price" not in data and "current_site_price" in data:
+                data["current_price"] = data["current_site_price"]
+
+            if "image" not in data and "image_url" in data:
+                data["image"] = data["image_url"]
+            elif "image_url" not in data and "image" in data:
+                data["image_url"] = data["image"]
+        return data
 
     @field_validator("current_site_price")
     @classmethod
@@ -112,6 +152,7 @@ class AnalyzeResponse(BaseModel):
     message: str
 
 
+
 class HealthResponse(BaseModel):
     """
     Response returned by GET /api/health.
@@ -128,6 +169,11 @@ class HealthResponse(BaseModel):
 
 class MatchStatus(str, Enum):
     EXACT_MATCH = "EXACT_MATCH"
+    POSSIBLE_MATCH = "POSSIBLE_MATCH"
+    CONFIGURATION_MISMATCH = "CONFIGURATION_MISMATCH"
+    MODEL_MISMATCH = "MODEL_MISMATCH"
+    INSUFFICIENT_DATA = "INSUFFICIENT_DATA"
+    # Backward compatibility
     UNVERIFIED_VARIANT = "UNVERIFIED_VARIANT"
     PROBABLE_MATCH = "PROBABLE_MATCH"
     UNCERTAIN_MATCH = "UNCERTAIN_MATCH"
@@ -154,6 +200,13 @@ class ComparableOffer(BaseModel):
     model_identifier: Optional[str] = None
     configuration: Optional[str] = None
     extracted_variants: Optional[dict[str, Any]] = None
+    seller_name: Optional[str] = None
+    delivery_estimate: Optional[str] = None
+    condition: Optional[str] = "New"
+    price_difference: Optional[float] = None
+    retailer_product_id: Optional[str] = None
+    image_url: Optional[str] = None
+    data_source: Optional[str] = None
 
     @field_validator("current_price")
     @classmethod
@@ -178,10 +231,6 @@ class ComparableOffer(BaseModel):
 
         allowed_domains = (
             "flipkart.com",
-            "croma.com",
-            "reliancedigital.in",
-            "vijaysales.com",
-            "tatacliq.com",
             "amazon.in",
         )
         host = parsed.netloc.lower()
@@ -196,7 +245,7 @@ class ComparableOffer(BaseModel):
 
 class SourceProductSummary(BaseModel):
     """
-    Details of the source product being compared.
+    Details of the source product being compared. Supports shared product interface fields.
     """
 
     product_name: str
@@ -204,11 +253,20 @@ class SourceProductSummary(BaseModel):
     mrp: Optional[float] = None
     url: str
     variant: Optional[str] = None
+    source_retailer: Optional[str] = None
+    retailer_product_id: Optional[str] = None
+    manufacturer_part_number: Optional[str] = None
+    brand: Optional[str] = None
+    model: Optional[str] = None
+    category: Optional[str] = None
+    specifications: Optional[dict[str, Any]] = None
+    availability: Optional[str] = None
+    image_url: Optional[str] = None
 
 
 class ComparePricesRequest(BaseModel):
     """
-    Payload sent to POST /api/compare-prices.
+    Payload sent to POST /api/compare-prices. Supports shared product interface fields and aliases.
     """
 
     url: str
@@ -217,6 +275,46 @@ class ComparePricesRequest(BaseModel):
     mrp: Optional[float] = None
     seller: Optional[str] = None
     variant: Optional[str] = None
+
+    # Universal shared fields
+    source_retailer: Optional[str] = None
+    product_title: Optional[str] = None
+    product_url: Optional[str] = None
+    current_price: Optional[float] = None
+    retailer_product_id: Optional[str] = None
+    manufacturer_part_number: Optional[str] = None
+    brand: Optional[str] = None
+    model: Optional[str] = None
+    category: Optional[str] = None
+    specifications: Optional[dict[str, Any]] = None
+    availability: Optional[str] = None
+    image: Optional[str] = None
+    image_url: Optional[str] = None
+
+    @model_validator(mode="before")
+    @classmethod
+    def populate_aliases(cls, data: Any) -> Any:
+        if isinstance(data, dict):
+            if "url" not in data and "product_url" in data:
+                data["url"] = data["product_url"]
+            elif "product_url" not in data and "url" in data:
+                data["product_url"] = data["url"]
+
+            if "product_name" not in data and "product_title" in data:
+                data["product_name"] = data["product_title"]
+            elif "product_title" not in data and "product_name" in data:
+                data["product_title"] = data["product_name"]
+
+            if "current_site_price" not in data and "current_price" in data:
+                data["current_site_price"] = data["current_price"]
+            elif "current_price" not in data and "current_site_price" in data:
+                data["current_price"] = data["current_site_price"]
+
+            if "image" not in data and "image_url" in data:
+                data["image"] = data["image_url"]
+            elif "image_url" not in data and "image" in data:
+                data["image_url"] = data["image"]
+        return data
 
     @field_validator("current_site_price")
     @classmethod
@@ -241,6 +339,7 @@ class RetailerDiagnostic(BaseModel):
     search_query: str
     http_status: Optional[int] = None
     status_reason: str
+    data_source: Optional[str] = None
     raw_listings_count: int = 0
     parsed_listings_count: int = 0
     valid_price_count: int = 0
@@ -262,6 +361,7 @@ class ComparePricesResponse(BaseModel):
     source_product: SourceProductSummary
     offers: list[ComparableOffer]
     verified_offers: list[ComparableOffer]
+    possible_offers: list[ComparableOffer] = Field(default_factory=list)
     lowest_price: Optional[float] = None
     lowest_price_retailer: Optional[str] = None
     lowest_price_url: Optional[str] = None
@@ -274,3 +374,16 @@ class ComparePricesResponse(BaseModel):
     retailer_diagnostics: list[RetailerDiagnostic] = Field(default_factory=list)
     diagnostics: Optional[dict[str, Any]] = None
     message: str
+    # SECTION A — Other Platform (Cross-Platform Comparison)
+    cross_platform_offers: list[ComparableOffer] = Field(default_factory=list)
+    cross_platform_status: str = "not_queried"
+    cross_platform_diagnostics: list[RetailerDiagnostic] = Field(default_factory=list)
+    lowest_verified_cross_platform_price: Optional[float] = None
+    cross_platform_summary: Optional[str] = None
+
+    # SECTION B — Other Sellers on this Platform (Same-Platform Seller Comparison)
+    same_platform_seller_offers: list[ComparableOffer] = Field(default_factory=list)
+    same_platform_status: str = "not_queried"
+    same_platform_diagnostics: list[RetailerDiagnostic] = Field(default_factory=list)
+    lowest_verified_same_platform_price: Optional[float] = None
+    same_platform_summary: Optional[str] = None

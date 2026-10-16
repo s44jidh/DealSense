@@ -9,14 +9,14 @@ from __future__ import annotations
 import unittest
 from unittest.mock import patch
 
-from app.main import analyze, compare_prices
+from app.main import analyze, compare_prices, retrieval_service
 from app.matcher import MatchStatus, ProductMatcher, RejectionCategory
 from app.models import (
     AnalyzeRequest,
     ComparableOffer,
     ComparePricesRequest,
 )
-from app.retrieval import BaseRetriever, OfferRetrievalService
+from app.retrieval import AmazonRetriever, BaseRetriever, OfferRetrievalService
 
 
 class MockRetriever(BaseRetriever):
@@ -433,5 +433,1100 @@ class DealSenseStrictMatchingTests(unittest.TestCase):
             self.assertNotEqual(dell_res.source_product.product_name, football_res.source_product.product_name)
 
 
+
+    # ---------------------------------------------------------------------------
+    # Regression Suite: Flipkart MacBook Exact Matching & Rigorous Classification
+    # ---------------------------------------------------------------------------
+
+    # Regression 1: MacBook Air 13" M5 24GB 1TB Midnight matches Flipkart MDHG4HN/A
+    def test_regression_01_macbook_air_m5_exact_match(self):
+        src_title = "Apple 2026 MacBook Air 13-inch with M5 chip (24 GB unified memory, 1 TB SSD, Midnight)"
+        cand_title = "Apple MacBook Air (M5, 2026) M5 - (24 GB/1 TB SSD/Tahoe) MDHG4HN/A"
+        cand_url = "https://www.flipkart.com/apple-macbook-air-m5-2026-24-gb-1-tb-ssd-tahoe-mdhg4hn-a/p/itm0b3c64c6090e7"
+        
+        status, reason, cat, cand_vars = ProductMatcher.evaluate_match(
+            source_title=src_title,
+            candidate_title=cand_title,
+            source_variant="Midnight",
+            candidate_url=cand_url,
+        )
+        self.assertEqual(status, MatchStatus.EXACT_MATCH)
+        self.assertEqual(cat, RejectionCategory.VALID_MATCH)
+        self.assertEqual(cand_vars["color"], "midnight")
+        self.assertEqual(cand_vars["screen_size"], "13-inch")
+        self.assertEqual(cand_vars["ram"], "24 GB")
+        self.assertEqual(cand_vars["storage"], "1 TB")
+        self.assertEqual(cand_vars["cpu_family"], "m5")
+
+        # Full endpoint comparison: ₹1,88,890 Amazon vs ₹1,86,990 Flipkart saves ₹1,900
+        cand = [{
+            "retailer_name": "Flipkart",
+            "product_title": cand_title,
+            "product_url": cand_url,
+            "current_price": 186990.0,
+            "availability": "IN_STOCK",
+        }]
+        retriever = MockRetriever(name="Flipkart", offers=cand)
+        with patch("app.main.retrieval_service", OfferRetrievalService(retrievers=[retriever])):
+            res = compare_prices(ComparePricesRequest(
+                url="https://www.amazon.in/dp/B0GR1C18B7",
+                product_name=src_title,
+                current_site_price=188890.0,
+                variant="Midnight",
+            ))
+            self.assertEqual(res.status, "success")
+            self.assertEqual(len(res.verified_offers), 1)
+            self.assertEqual(res.verified_offers[0].match_status, "EXACT_MATCH")
+            self.assertEqual(res.lowest_price, 186990.0)
+            self.assertEqual(res.lowest_price_retailer, "Flipkart")
+            self.assertEqual(res.price_difference, 1900.0)
+            self.assertIn("LOWER ON FLIPKART", res.verdict_label)
+            self.assertIn("1,900.00", res.summary)
+
+    # Regression 2: MacBook with 16 GB RAM instead of 24 GB rejected as CONFIGURATION_MISMATCH
+    def test_regression_02_macbook_ram_mismatch_rejected(self):
+        src_title = "Apple 2026 MacBook Air 13-inch with M5 chip (24 GB unified memory, 1 TB SSD, Midnight)"
+        cand_title = "Apple MacBook Air (M5, 2026) M5 - (16 GB/1 TB SSD/Tahoe) MDHC4HN/A"
+        
+        status, reason, cat, _ = ProductMatcher.evaluate_match(
+            source_title=src_title,
+            candidate_title=cand_title,
+            source_variant="Midnight",
+        )
+        self.assertEqual(status, MatchStatus.CONFIGURATION_MISMATCH)
+        self.assertEqual(cat, RejectionCategory.CONFIG_MISMATCH)
+        self.assertIn("ram", reason.lower())
+        self.assertIn("24 GB", reason)
+        self.assertIn("16 GB", reason)
+
+    # Regression 3: MacBook with 512 GB SSD instead of 1 TB rejected as CONFIGURATION_MISMATCH
+    def test_regression_03_macbook_storage_mismatch_rejected(self):
+        src_title = "Apple 2026 MacBook Air 13-inch with M5 chip (24 GB unified memory, 1 TB SSD, Midnight)"
+        cand_title = "Apple MacBook Air (M5, 2026) M5 - (24 GB/512 GB SSD/Tahoe) MDHH4HN/A"
+        
+        status, reason, cat, _ = ProductMatcher.evaluate_match(
+            source_title=src_title,
+            candidate_title=cand_title,
+            source_variant="Midnight",
+        )
+        self.assertEqual(status, MatchStatus.CONFIGURATION_MISMATCH)
+        self.assertEqual(cat, RejectionCategory.CONFIG_MISMATCH)
+        self.assertIn("storage", reason.lower())
+        self.assertIn("1 TB", reason)
+        self.assertIn("512 GB", reason)
+
+    # Regression 4: An M4 MacBook instead of M5 rejected as CONFIGURATION_MISMATCH
+    def test_regression_04_macbook_chip_mismatch_rejected(self):
+        src_title = "Apple 2026 MacBook Air 13-inch with M5 chip (24 GB unified memory, 1 TB SSD, Midnight)"
+        cand_title = "Apple MacBook Air (M4, 2024) M4 - (24 GB/1 TB SSD/Tahoe)"
+        
+        status, reason, cat, _ = ProductMatcher.evaluate_match(
+            source_title=src_title,
+            candidate_title=cand_title,
+            source_variant="Midnight",
+        )
+        self.assertEqual(status, MatchStatus.CONFIGURATION_MISMATCH)
+        self.assertEqual(cat, RejectionCategory.CONFIG_MISMATCH)
+        self.assertIn("chip mismatch", reason.lower())
+        self.assertIn("M5", reason)
+        self.assertIn("M4", reason)
+
+    # Regression 5: MacBook Pro instead of MacBook Air rejected as MODEL_MISMATCH
+    def test_regression_05_macbook_pro_vs_air_rejected(self):
+        src_title = "Apple 2026 MacBook Air 13-inch with M5 chip (24 GB unified memory, 1 TB SSD, Midnight)"
+        cand_title = "Apple MacBook Pro (M5, 2026) M5 - (24 GB/1 TB SSD/Tahoe)"
+        
+        status, reason, cat, _ = ProductMatcher.evaluate_match(
+            source_title=src_title,
+            candidate_title=cand_title,
+            source_variant="Midnight",
+        )
+        self.assertEqual(status, MatchStatus.MODEL_MISMATCH)
+        self.assertEqual(cat, RejectionCategory.MODEL_MISMATCH)
+        self.assertTrue("pro" in reason.lower() or "family" in reason.lower() or "model" in reason.lower())
+
+    # Regression 6: Listing with missing model identifiers where color cannot be established -> POSSIBLE_MATCH
+    def test_regression_06_macbook_missing_model_identifier_possible_match(self):
+        src_title = "Apple 2026 MacBook Air 13-inch with M5 chip (24 GB unified memory, 1 TB SSD, Midnight)"
+        cand_title = "Apple MacBook Air (M5, 2026) M5 - (24 GB/1 TB SSD/Tahoe)"
+        
+        status, reason, cat, _ = ProductMatcher.evaluate_match(
+            source_title=src_title,
+            candidate_title=cand_title,
+            source_variant="Midnight",
+        )
+        self.assertEqual(status, MatchStatus.POSSIBLE_MATCH)
+        self.assertEqual(cat, RejectionCategory.UNVERIFIED_VARIANT)
+        self.assertIn("unverified", reason.lower())
+
+    # Regression 7: Listing with conflicting model identifiers rejected
+    def test_regression_07_conflicting_model_identifiers_rejected(self):
+        src_title = "Apple 2026 MacBook Air 13-inch with M5 chip MDHG4HN/A"
+        cand_title = "Apple MacBook Air (M5, 2026) MDHD4HN/A"
+        
+        status, reason, cat, _ = ProductMatcher.evaluate_match(
+            source_title=src_title,
+            candidate_title=cand_title,
+        )
+        self.assertEqual(status, MatchStatus.MODEL_MISMATCH)
+        self.assertEqual(cat, RejectionCategory.MODEL_MISMATCH)
+        self.assertIn("model identifier mismatch", reason.lower())
+
+    # Regression 8: Listing with a different colour rejected as CONFIGURATION_MISMATCH
+    def test_regression_08_macbook_different_color_rejected(self):
+        src_title = "Apple 2026 MacBook Air 13-inch with M5 chip (24 GB, 1 TB SSD, Midnight)"
+        cand_title = "Apple MacBook Air (M5, 2026) Starlight - (24 GB/1 TB SSD/Tahoe) MDHK4HN/A"
+        
+        status, reason, cat, _ = ProductMatcher.evaluate_match(
+            source_title=src_title,
+            candidate_title=cand_title,
+            source_variant="Midnight",
+        )
+        self.assertEqual(status, MatchStatus.CONFIGURATION_MISMATCH)
+        self.assertEqual(cat, RejectionCategory.CONFIG_MISMATCH)
+        self.assertIn("color", reason.lower())
+
+    # Regression 9: Failed retailer request correctly reported as Query failed
+    def test_regression_09_failed_retailer_request_diagnostics(self):
+        class FailingRetriever(BaseRetriever):
+            name = "Flipkart"
+            domain = "flipkart.com"
+            is_enabled = True
+            status_reason = "Active"
+            last_http_status = 403
+
+            def search(self, query: str, timeout: float = 6.0) -> list[dict]:
+                self.last_http_status = 403
+                return []
+
+        retriever = FailingRetriever()
+        svc = OfferRetrievalService(retrievers=[retriever])
+        _, _, statuses, _, _, diags = svc.retrieve_and_match("Apple MacBook Air M5")
+        
+        self.assertIn("Flipkart", statuses)
+        self.assertIn("Query failed (HTTP 403)", statuses["Flipkart"])
+        self.assertNotIn("Queried successfully", statuses["Flipkart"])
+        self.assertEqual(diags[0].http_status, 403)
+
+    # Regression 10: Unrelated sponsored or recommended products appearing in search results rejected
+    def test_regression_10_unrelated_sponsored_products_rejected(self):
+        src_title = "Apple 2026 MacBook Air 13-inch with M5 chip (24 GB, 1 TB SSD, Midnight)"
+        
+        # Sponsored phone case
+        cand_case = "Shockproof Armor Case for Apple MacBook Air 13-inch Midnight"
+        st_case, _, cat_case, _ = ProductMatcher.evaluate_match(src_title, cand_case)
+        self.assertEqual(st_case, MatchStatus.MISMATCH)
+        self.assertEqual(cat_case, RejectionCategory.ACCESSORY_OR_CONDITION)
+
+        # Sponsored Dell laptop
+        cand_dell = "Dell Inspiron 15 Intel Core i5 Laptop (16 GB, 512 GB SSD)"
+        st_dell, _, cat_dell, _ = ProductMatcher.evaluate_match(src_title, cand_dell)
+        self.assertEqual(st_dell, MatchStatus.MODEL_MISMATCH)
+        self.assertEqual(cat_dell, RejectionCategory.MODEL_MISMATCH)
+
+    # Regression 11: Malformed or incomplete candidate returns INSUFFICIENT_DATA
+    def test_regression_11_malformed_incomplete_candidate_rejected(self):
+        src_title = "Apple 2026 MacBook Air 13-inch with M5 chip (24 GB, 1 TB SSD, Midnight)"
+        cand_empty = "   "
+        st_empty, reason_empty, cat_empty, _ = ProductMatcher.evaluate_match(src_title, cand_empty)
+        self.assertEqual(st_empty, MatchStatus.INSUFFICIENT_DATA)
+        self.assertEqual(cat_empty, RejectionCategory.INSUFFICIENT_DATA)
+        self.assertIn("insufficient", reason_empty.lower())
+
+    # Regression 12: Stale results from a previous product analysis do not leak
+    def test_regression_12_stale_results_not_leaked(self):
+        mac_req = ComparePricesRequest(
+            url="https://www.amazon.in/dp/B0GR1C18B7",
+            product_name="Apple 2026 MacBook Air 13-inch with M5 chip (24 GB, 1 TB SSD, Midnight)",
+            current_site_price=188890.0,
+            variant="Midnight",
+        )
+        football_req = ComparePricesRequest(
+            url="https://www.amazon.in/dp/B00KVEB182",
+            product_name="Nivia Storm Football - Size 5",
+            current_site_price=399.0,
+        )
+
+        mac_cand = [{
+            "retailer_name": "Flipkart",
+            "product_title": "Apple MacBook Air (M5, 2026) M5 - (24 GB/1 TB SSD/Tahoe) MDHG4HN/A",
+            "product_url": "https://www.flipkart.com/apple-macbook-air-m5-2026-24-gb-1-tb-ssd-tahoe-mdhg4hn-a/p/itm0b3c64c6090e7",
+            "current_price": 186990.0,
+            "availability": "IN_STOCK",
+        }]
+        retriever = MockRetriever(name="Flipkart", offers=mac_cand)
+        with patch("app.main.retrieval_service", OfferRetrievalService(retrievers=[retriever])):
+            mac_res = compare_prices(mac_req)
+            self.assertEqual(mac_res.status, "success")
+            self.assertEqual(len(mac_res.verified_offers), 1)
+
+            # Sequential request for football must not retain macbook results
+            empty_retriever = MockRetriever(name="Flipkart", offers=[])
+            with patch("app.main.retrieval_service", OfferRetrievalService(retrievers=[empty_retriever])):
+                fb_res = compare_prices(football_req)
+                self.assertEqual(fb_res.status, "no_offers_found")
+                self.assertEqual(len(fb_res.verified_offers), 0)
+                self.assertEqual(fb_res.source_product.product_name, "Nivia Storm Football - Size 5")
+
+    # Regression 13: Amazon-origin comparison queries Flipkart and excludes Amazon
+    def test_regression_13_amazon_origin_queries_flipkart_excludes_amazon(self):
+        req = ComparePricesRequest(
+            url="https://www.amazon.in/dp/B0GR1C18B7",
+            product_name="Apple 2026 MacBook Air 13-inch with M5 chip",
+            current_site_price=188890.0,
+            source_retailer="Amazon.in",
+        )
+        fk_offer = [{
+            "retailer_name": "Flipkart",
+            "product_title": "Apple MacBook Air (M5, 2026) (24 GB/1 TB SSD) MDHG4HN/A",
+            "product_url": "https://www.flipkart.com/apple-macbook-air/p/itm123",
+            "current_price": 186990.0,
+            "availability": "IN_STOCK",
+        }]
+        amz_retriever = MockRetriever(name="Amazon.in", domain="amazon.in", offers=[])
+        fk_retriever = MockRetriever(name="Flipkart", domain="flipkart.com", offers=fk_offer)
+
+        service = OfferRetrievalService(retrievers=[amz_retriever, fk_retriever])
+        with patch("app.main.retrieval_service", service):
+            res = compare_prices(req)
+            self.assertEqual(res.status, "success")
+            self.assertIn("Flipkart", res.retailers_queried)
+            self.assertNotIn("Amazon.in", res.retailers_queried, "Amazon-origin comparison must not query Amazon against itself")
+            self.assertEqual(res.source_product.source_retailer, "Amazon.in")
+            self.assertEqual(len(res.verified_offers), 1)
+            self.assertEqual(res.verified_offers[0].retailer_name, "Flipkart")
+
+    # Regression 14: Flipkart-origin comparison queries Amazon and excludes Flipkart
+    def test_regression_14_flipkart_origin_queries_amazon_excludes_flipkart(self):
+        req = ComparePricesRequest(
+            url="https://www.flipkart.com/nothing-phone-4b-blue-128-gb/p/itm939608b40adbb",
+            product_name="Nothing Phone (4b) (Black, 256 GB) (8 GB RAM)",
+            current_site_price=40999.0,
+            source_retailer="Flipkart",
+        )
+        amz_offer = [{
+            "retailer_name": "Amazon.in",
+            "product_title": "Nothing Phone 4b (Black, 256 GB) (8 GB RAM)",
+            "product_url": "https://www.amazon.in/dp/B0H1X5XP25",
+            "current_price": 39999.0,
+            "availability": "IN_STOCK",
+        }]
+        amz_retriever = MockRetriever(name="Amazon.in", domain="amazon.in", offers=amz_offer)
+        fk_retriever = MockRetriever(name="Flipkart", domain="flipkart.com", offers=[])
+
+        service = OfferRetrievalService(retrievers=[amz_retriever, fk_retriever])
+        with patch("app.main.retrieval_service", service):
+            res = compare_prices(req)
+            self.assertEqual(res.status, "success")
+            self.assertIn("Amazon.in", res.retailers_queried)
+            self.assertNotIn("Flipkart", res.retailers_queried, "Flipkart-origin comparison must not query Flipkart against itself")
+            self.assertEqual(res.source_product.source_retailer, "Flipkart")
+            self.assertEqual(len(res.verified_offers), 1)
+            self.assertEqual(res.verified_offers[0].retailer_name, "Amazon.in")
+            self.assertIn("saving", res.summary.lower())
+            self.assertIn("flipkart", res.summary.lower())
+
+    # Regression 15: Croma, Reliance Digital, and Vijay Sales are never queried
+    def test_regression_15_inactive_retailers_never_queried(self):
+        class SpyingRetriever(BaseRetriever):
+            def __init__(self, name, domain, is_enabled):
+                self.name = name
+                self.domain = domain
+                self.is_enabled = is_enabled
+                self.status_reason = "Disabled"
+                self.called = False
+
+            def search(self, query: str, timeout: float = 6.0) -> list[dict]:
+                self.called = True
+                return []
+
+        croma = SpyingRetriever("Croma", "croma.com", False)
+        reliance = SpyingRetriever("Reliance Digital", "reliancedigital.in", False)
+        vijay = SpyingRetriever("Vijay Sales", "vijaysales.com", False)
+        fk = MockRetriever("Flipkart", "flipkart.com", [])
+
+        service = OfferRetrievalService(retrievers=[fk, croma, reliance, vijay])
+        service.retrieve_and_match("Apple MacBook Air", source_url="https://www.amazon.in/dp/B001")
+
+        self.assertFalse(croma.called, "Croma must never be queried")
+        self.assertFalse(reliance.called, "Reliance Digital must never be queried")
+        self.assertFalse(vijay.called, "Vijay Sales must never be queried")
+
+    # Regression 16: Nothing Phone 4b exact match verification
+    def test_regression_16_nothing_phone_4b_exact_match(self):
+        src = "Nothing Phone (4b) (Black, 256 GB) (8 GB RAM)"
+        cand = "Nothing Phone 4b (Black, 256 GB) (8 GB RAM)"
+        status, reason, cat, _ = ProductMatcher.evaluate_match(src, cand)
+        self.assertEqual(status, MatchStatus.EXACT_MATCH)
+        self.assertEqual(cat, RejectionCategory.VALID_MATCH)
+
+    # Regression 17: Nothing Phone 4b vs 2a model mismatch
+    def test_regression_17_nothing_phone_4b_vs_2a_model_mismatch(self):
+        src = "Nothing Phone (4b) (Black, 256 GB) (8 GB RAM)"
+        cand = "Nothing Phone 2a (Black, 256 GB) (8 GB RAM)"
+        status, reason, cat, _ = ProductMatcher.evaluate_match(src, cand)
+        self.assertEqual(status, MatchStatus.MODEL_MISMATCH)
+        self.assertEqual(cat, RejectionCategory.MODEL_MISMATCH)
+        self.assertIn("mismatch", reason.lower())
+
+    # Regression 18: Nothing Phone 4b configuration mismatch
+    def test_regression_18_nothing_phone_4b_config_mismatch(self):
+        src = "Nothing Phone (4b) (Black, 256 GB) (8 GB RAM)"
+        cand = "Nothing Phone 4b (Black, 128 GB) (8 GB RAM)"
+        status, reason, cat, _ = ProductMatcher.evaluate_match(src, cand)
+        self.assertEqual(status, MatchStatus.CONFIGURATION_MISMATCH)
+        self.assertEqual(cat, RejectionCategory.CONFIG_MISMATCH)
+
+    # Regression 19: Shared product interface accepts retailer_product_id without treating it as MPN
+    def test_regression_19_shared_product_interface_fields_accepted(self):
+        req = ComparePricesRequest(
+            product_title="Nothing Phone (4b) (Black, 256 GB)",
+            product_url="https://www.flipkart.com/item/p/itm939608b40adbb",
+            current_price=40999.0,
+            source_retailer="Flipkart",
+            retailer_product_id="MOBHZMBDNBKCHZ7B",
+            manufacturer_part_number=None,
+            brand="Nothing",
+            category="smartphone",
+            specifications={"storage": "256 GB", "color": "Black"},
+        )
+        self.assertEqual(req.product_name, "Nothing Phone (4b) (Black, 256 GB)")
+        self.assertEqual(req.current_site_price, 40999.0)
+        self.assertEqual(req.url, "https://www.flipkart.com/item/p/itm939608b40adbb")
+        self.assertEqual(req.retailer_product_id, "MOBHZMBDNBKCHZ7B")
+        self.assertIsNone(req.manufacturer_part_number)
+
+
+
+    # ---------------------------------------------------------------------------
+    # Phase 8 — Comprehensive Testing for Section A and Section B
+    # ---------------------------------------------------------------------------
+
+    # 1. Source routing: Amazon source -> Flipkart cross-platform + Amazon same-platform
+    def test_routing_amazon_source_routes_correctly(self):
+        req = ComparePricesRequest(
+            url="https://www.amazon.in/dp/B0GR1C18B7",
+            product_name="Apple 2026 MacBook Air 13-inch M5",
+            current_site_price=188890.0,
+            source_retailer="Amazon.in",
+            seller="Appario Retail",
+            variant="Midnight, 24 GB, 1 TB",
+            retailer_product_id="B0GR1C18B7",
+        )
+        with patch.object(retrieval_service, "retrieve_and_match") as mock_cross,              patch.object(retrieval_service, "retrieve_same_platform_sellers") as mock_same:
+            mock_cross.return_value = (
+                [{
+                    "retailer_name": "Flipkart",
+                    "product_title": "Apple MacBook Air (M5, 2026)",
+                    "product_url": "https://www.flipkart.com/p/itm123",
+                    "current_price": 186990.0,
+                    "match_status": "EXACT_MATCH",
+                    "retrieval_timestamp": "2026-10-16T12:00:00Z",
+                    "seller_name": "IndiFlashMart",
+                }],
+                ["Flipkart"],
+                {"Flipkart": "Success"},
+                "query",
+                [],
+                []
+            )
+            mock_same.return_value = (
+                [{
+                    "retailer_name": "Amazon.in",
+                    "product_title": "Apple 2026 MacBook Air 13-inch M5",
+                    "product_url": "https://www.amazon.in/dp/B0GR1C18B8",
+                    "current_price": 187500.0,
+                    "match_status": "EXACT_MATCH",
+                    "retrieval_timestamp": "2026-10-16T12:00:00Z",
+                    "seller_name": "Cloudtail India",
+                    "price_difference": 1390.0,
+                }],
+                "success",
+                [],
+                187500.0,
+                "Found 1 alternative verified seller(s) on Amazon.in."
+            )
+            res = compare_prices(req)
+            self.assertEqual(len(res.cross_platform_offers), 1)
+            self.assertEqual(res.cross_platform_offers[0].retailer_name, "Flipkart")
+            self.assertNotIn("Amazon.in", [o.retailer_name for o in res.cross_platform_offers])
+
+            self.assertEqual(len(res.same_platform_seller_offers), 1)
+            self.assertEqual(res.same_platform_seller_offers[0].retailer_name, "Amazon.in")
+            self.assertEqual(res.same_platform_seller_offers[0].seller_name, "Cloudtail India")
+            self.assertEqual(res.same_platform_status, "success")
+
+    # 2. Source routing: Flipkart source -> Amazon cross-platform + Flipkart same-platform
+    def test_routing_flipkart_source_routes_correctly(self):
+        req = ComparePricesRequest(
+            url="https://www.flipkart.com/apple-macbook-air-m5/p/itm123",
+            product_name="Apple MacBook Air (M5, 2026)",
+            current_site_price=186990.0,
+            source_retailer="Flipkart",
+            seller="IndiFlashMart",
+            variant="Midnight, 24 GB, 1 TB",
+            retailer_product_id="MOB123XYZ",
+        )
+        with patch.object(retrieval_service, "retrieve_and_match") as mock_cross,              patch.object(retrieval_service, "retrieve_same_platform_sellers") as mock_same:
+            mock_cross.return_value = (
+                [{
+                    "retailer_name": "Amazon.in",
+                    "product_title": "Apple 2026 MacBook Air 13-inch M5",
+                    "product_url": "https://www.amazon.in/dp/B0GR1C18B7",
+                    "current_price": 188890.0,
+                    "match_status": "EXACT_MATCH",
+                    "retrieval_timestamp": "2026-10-16T12:00:00Z",
+                    "seller_name": "Appario Retail",
+                }],
+                ["Amazon.in"],
+                {"Amazon.in": "Success"},
+                "query",
+                [],
+                []
+            )
+            mock_same.return_value = (
+                [{
+                    "retailer_name": "Flipkart",
+                    "product_title": "Apple MacBook Air (M5, 2026)",
+                    "product_url": "https://www.flipkart.com/p/itm999",
+                    "current_price": 185000.0,
+                    "match_status": "EXACT_MATCH",
+                    "retrieval_timestamp": "2026-10-16T12:00:00Z",
+                    "seller_name": "SuperComNet",
+                    "price_difference": 1990.0,
+                }],
+                "success",
+                [],
+                185000.0,
+                "Found 1 alternative verified seller(s) on Flipkart."
+            )
+            res = compare_prices(req)
+            self.assertEqual(len(res.cross_platform_offers), 1)
+            self.assertEqual(res.cross_platform_offers[0].retailer_name, "Amazon.in")
+            self.assertNotIn("Flipkart", [o.retailer_name for o in res.cross_platform_offers])
+
+            self.assertEqual(len(res.same_platform_seller_offers), 1)
+            self.assertEqual(res.same_platform_seller_offers[0].retailer_name, "Flipkart")
+            self.assertEqual(res.same_platform_seller_offers[0].seller_name, "SuperComNet")
+
+    # 3. Flow isolation: failure in one flow does not erase results from the other
+    def test_flow_isolation_failure_does_not_erase_other_flow(self):
+        req = ComparePricesRequest(
+            url="https://www.amazon.in/dp/B0GR1C18B7",
+            product_name="Apple 2026 MacBook Air 13-inch M5",
+            current_site_price=188890.0,
+            source_retailer="Amazon.in",
+        )
+        with patch.object(retrieval_service, "retrieve_and_match") as mock_cross,              patch.object(retrieval_service, "retrieve_same_platform_sellers") as mock_same:
+            mock_cross.return_value = (
+                [{
+                    "retailer_name": "Flipkart",
+                    "product_title": "Apple MacBook Air (M5, 2026)",
+                    "product_url": "https://www.flipkart.com/p/itm123",
+                    "current_price": 186990.0,
+                    "match_status": "EXACT_MATCH",
+                    "retrieval_timestamp": "2026-10-16T12:00:00Z",
+                }],
+                ["Flipkart"],
+                {"Flipkart": "Success"},
+                "query",
+                [],
+                []
+            )
+            mock_same.side_effect = TimeoutError("Retailer network timeout")
+
+            res = compare_prices(req)
+            # Cross-platform offers must be preserved
+            self.assertEqual(len(res.cross_platform_offers), 1)
+            self.assertEqual(res.cross_platform_offers[0].current_price, 186990.0)
+            self.assertEqual(res.status, "success")
+            # Same-platform reports error without crashing response
+            self.assertEqual(res.same_platform_status, "error")
+            self.assertEqual(len(res.same_platform_seller_offers), 0)
+
+    # 4. Seller verification: multiple genuinely distinct sellers and duplicate removal
+    def test_seller_multiple_distinct_and_deduplication(self):
+        candidates = [
+            {"retailer_name": "Amazon.in", "product_title": "Logitech G29 Driving Force Racing Wheel", "product_url": "https://www.amazon.in/dp/B000SRC", "retailer_product_id": "B000SRC", "current_price": 29990.0, "seller_name": "Current Seller"},
+            {"retailer_name": "Amazon.in", "product_title": "Logitech G29 Driving Force Racing Wheel", "product_url": "https://www.amazon.in/dp/B000ALT1", "retailer_product_id": "B000ALT1", "current_price": 27990.0, "seller_name": "Seller Alpha"},
+            {"retailer_name": "Amazon.in", "product_title": "Logitech G29 Driving Force Racing Wheel", "product_url": "https://www.amazon.in/dp/B000ALT1_DUP", "retailer_product_id": "B000ALT1_DUP", "current_price": 27990.0, "seller_name": "Seller Alpha"},
+            {"retailer_name": "Amazon.in", "product_title": "Logitech G29 Driving Force Racing Wheel", "product_url": "https://www.amazon.in/dp/B000ALT2", "retailer_product_id": "B000ALT2", "current_price": 31500.0, "seller_name": "Seller Beta"},
+        ]
+        from app.retrieval import BaseRetriever
+        class MockRetriever(BaseRetriever):
+            name = "Amazon.in"
+            domain = "amazon.in"
+            is_enabled = True
+            status_reason = "Active"
+            def search(self, query: str, timeout: float = 6.0):
+                return candidates
+
+        svc = OfferRetrievalService(retrievers=[MockRetriever()])
+        offers, status, diags, lowest, summary = svc.retrieve_same_platform_sellers(
+            source_title="Logitech G29 Driving Force Racing Wheel",
+            source_retailer="Amazon.in",
+            source_url="https://www.amazon.in/dp/B000SRC",
+            source_price=29990.0,
+            source_seller="Current Seller",
+            source_product_id="B000SRC",
+        )
+        self.assertEqual(status, "success")
+        self.assertEqual(len(offers), 2)
+        self.assertEqual(offers[0]["seller_name"], "Seller Alpha")
+        self.assertEqual(offers[0]["price_difference"], 2000.0) # 29990 - 27990
+        self.assertEqual(offers[1]["seller_name"], "Seller Beta")
+        self.assertEqual(offers[1]["price_difference"], -1510.0) # 29990 - 31500
+
+    # 5. Seller verification: missing seller identity returns seller_data_unavailable truthfully
+    def test_seller_missing_identity_reports_unavailable(self):
+        candidates = [
+            {"retailer_name": "Amazon.in", "product_title": "Logitech G29 Driving Force Racing Wheel", "product_url": "https://www.amazon.in/dp/B000ALT9", "retailer_product_id": "B000ALT9", "current_price": 27990.0, "seller_name": None}
+        ]
+        from app.retrieval import BaseRetriever
+        class MockRetriever(BaseRetriever):
+            name = "Amazon.in"
+            domain = "amazon.in"
+            is_enabled = True
+            status_reason = "Active"
+            def search(self, query: str, timeout: float = 6.0):
+                return candidates
+
+        svc = OfferRetrievalService(retrievers=[MockRetriever()])
+        offers, status, diags, lowest, summary = svc.retrieve_same_platform_sellers(
+            source_title="Logitech G29 Driving Force Racing Wheel",
+            source_retailer="Amazon.in",
+            source_url="https://www.amazon.in/dp/B000SRC",
+            source_price=29990.0,
+            source_seller="Current Seller",
+            source_product_id="B000SRC",
+        )
+        self.assertEqual(status, "seller_data_unavailable")
+        self.assertEqual(len(offers), 0)
+        self.assertIn("Alternative sellers could not be verified", summary)
+
+    # 6. Matching: Logitech G29 exact match with gamepad/controller wording
+    def test_matching_controller_gamepad_wording_equivalence(self):
+        src = "Logitech G29 Driving Force Racing Wheel and Pedals"
+        cand = "Logitech G29 Gamepad / Controller Racing Wheel"
+        status, reason, cat, _ = ProductMatcher.evaluate_match(src, cand)
+        self.assertEqual(status, MatchStatus.EXACT_MATCH)
+        self.assertEqual(cat, RejectionCategory.VALID_MATCH)
+
+    # 7. Matching: Logitech G29 vs G920 model mismatch
+    def test_matching_controller_model_mismatch_g29_vs_g920(self):
+        src = "Logitech G29 Driving Force Racing Wheel"
+        cand = "Logitech G920 Driving Force Racing Wheel"
+        status, reason, cat, _ = ProductMatcher.evaluate_match(src, cand)
+        self.assertEqual(status, MatchStatus.MODEL_MISMATCH)
+        self.assertEqual(cat, RejectionCategory.MODEL_MISMATCH)
+
+    # 8. Matching: Wired vs wireless controller configuration mismatch
+    def test_matching_controller_wired_vs_wireless_mismatch(self):
+        src = "Xbox Wireless Controller Carbon Black"
+        cand = "Xbox Wired Controller Carbon Black"
+        status, reason, cat, _ = ProductMatcher.evaluate_match(src, cand)
+        self.assertEqual(status, MatchStatus.CONFIGURATION_MISMATCH)
+        self.assertEqual(cat, RejectionCategory.CONFIG_MISMATCH)
+
+    # 9. Matching: Shifter accessory rejected for racing wheel product
+    def test_matching_controller_accessory_shifter_rejected(self):
+        src = "Logitech G29 Driving Force Racing Wheel"
+        cand = "Logitech G Driving Force Shifter for G29 and G920"
+        status, reason, cat, _ = ProductMatcher.evaluate_match(src, cand)
+        self.assertEqual(status, MatchStatus.MISMATCH)
+        self.assertEqual(cat, RejectionCategory.ACCESSORY_OR_CONDITION)
+
+    # 10. Retrieval failure: zero results reported truthfully
+    def test_retrieval_failure_zero_results(self):
+        from app.retrieval import BaseRetriever
+        class EmptyRetriever(BaseRetriever):
+            name = "Flipkart"
+            domain = "flipkart.com"
+            is_enabled = True
+            status_reason = "Active"
+            last_http_status = 200
+            last_raw_count = 0
+            last_parsed_count = 0
+            def search(self, query: str, timeout: float = 6.0):
+                return []
+
+        svc = OfferRetrievalService(retrievers=[EmptyRetriever()])
+        offers, queried, statuses, q, evals, diags = svc.retrieve_and_match(
+            "Logitech G29 Driving Force Racing Wheel",
+            source_retailer="Amazon.in"
+        )
+        self.assertEqual(len(offers), 0)
+        self.assertIn("0 listings returned", statuses.get("Flipkart", ""))
+
+
+    # -------------------------------------------------------------------------
+    # Regression Test Suite: Live Pipeline & Shared Architecture (Phase 3.3)
+    # -------------------------------------------------------------------------
+
+    # 1. Amazon HTTP 503 and CAPTCHA/error pages
+    def test_amazon_http_503_and_captcha_error_pages(self):
+        retriever = AmazonRetriever()
+        
+        # Test 503 HTML body
+        html_503 = """<html><head><title>503 - Service Unavailable Error</title></head>
+        <body><p>It's rush hour and traffic is piling up on that page. Automated access to Amazon data.</p></body></html>"""
+        status_503 = retriever._is_bot_blocked(html_503)
+        self.assertEqual(status_503, "503_block")
+
+        # Test CAPTCHA page
+        html_captcha = """<html><body><h4>Type the characters you see in this image:</h4>
+        <input name="captcha" /></body></html>"""
+        status_captcha = retriever._is_bot_blocked(html_captcha)
+        self.assertEqual(status_captcha, "captcha")
+
+        # Test Akamai bot block page
+        html_akamai = """<html><script>window.bm_verify = true; triggerInterstitialChallenge();</script></html>"""
+        status_akamai = retriever._is_bot_blocked(html_akamai)
+        self.assertEqual(status_akamai, "bot_block")
+
+    # 2. Valid Amazon search results and price extraction
+    def test_valid_amazon_search_results_and_price_extraction(self):
+        retriever = AmazonRetriever()
+        sample_html = """
+        <div data-asin="B0FLJ5QFZQ" class="s-result-item">
+            <h2><a href="/Kreo-Controller-Wireless-Gaming/dp/B0FLJ5QFZQ/ref=sr_1_1"><span>Surge XB Wireless Gaming Controller</span></a></h2>
+            <span class="a-price"><span class="a-offscreen">₹1,899.00</span></span>
+            <span class="a-price a-text-price"><span class="a-offscreen">₹4,999.00</span></span>
+        </div>
+        <div data-asin="B0GYX4H4GW" class="s-result-item">
+            <h2><a href="/Kreo-Controller-Wired-Gaming/dp/B0GYX4H4GW"><span>Surge LITE Wired Gaming Controller</span></a></h2>
+            <span class="a-price"><span class="a-offscreen">₹1,299.00</span></span>
+        </div>
+        """
+        parsed = retriever._parse_amazon_html(sample_html)
+        self.assertEqual(len(parsed), 2)
+        self.assertEqual(parsed[0]["retailer_product_id"], "B0FLJ5QFZQ")
+        self.assertEqual(parsed[0]["current_price"], 1899.0)
+        self.assertEqual(parsed[0]["mrp"], 4999.0)
+        self.assertIn("/Kreo-Controller-Wireless-Gaming/dp/B0FLJ5QFZQ", parsed[0]["product_url"])
+        self.assertEqual(parsed[1]["current_price"], 1299.0)
+        self.assertIsNone(parsed[1]["mrp"])
+
+    # 3. Flipkart-to-Amazon and Amazon-to-Flipkart routing
+    def test_flipkart_to_amazon_and_amazon_to_flipkart_routing(self):
+        svc = OfferRetrievalService()
+        
+        # When source is Flipkart, cross-platform should target Amazon.in
+        fk_url = "https://www.flipkart.com/kreo-surge-xb/p/itm9bd006ba2dbca"
+        query = svc.build_search_query("Kreo Surge XB Wireless Gaming Controller")
+        self.assertIn("Kreo", query)
+        self.assertIn("Surge", query)
+
+        # When source is Amazon, cross-platform should target Flipkart
+        amz_url = "https://www.amazon.in/dp/B0FLJ5QFZQ"
+        query_amz = svc.build_search_query("Logitech G29 Driving Force Racing Wheel")
+        self.assertIn("Logitech", query_amz)
+        self.assertIn("G29", query_amz)
+
+    # 4. Genuine equivalent listings with different title wording
+    def test_genuine_equivalent_different_title_wording_matches(self):
+        src_fk = "Kreo Surge XB Wireless Gaming Controller with Hall Effect, Turbo Mode, RGB Bluetooth, USB Gamepad"
+        cand_amz = "Surge XB Wireless Gaming Controller with Hall Effect Joysticks & Triggers, Tri-Mode, Turbo Mode, Macro Buttons, RGB, 1000Hz Polling, Gaming controller for PC Wireless, Android."
+        cand_url = "https://www.amazon.in/Kreo-Controller-Joysticks-Connectivity-controller/dp/B0FLJ5QFZQ"
+
+        status, reason, cat, vars = ProductMatcher.evaluate_match(src_fk, cand_amz, candidate_url=cand_url)
+        self.assertEqual(status, MatchStatus.EXACT_MATCH)
+        self.assertEqual(cat, RejectionCategory.VALID_MATCH)
+        self.assertEqual(vars["brand"], "kreo")
+        self.assertEqual(vars["connectivity"], "wireless")
+
+    # 5. Different model, generation, connectivity and configuration rejection
+    def test_different_model_generation_connectivity_configuration_rejection(self):
+        src = "Kreo Surge XB Wireless Gaming Controller with Hall Effect, Turbo Mode, RGB Bluetooth, USB Gamepad"
+        
+        # Different model: Mirage
+        cand_mirage = "Mirage Wireless RGB Gaming Controller for PC, Android, iOS & PS4"
+        st_m, _, cat_m, _ = ProductMatcher.evaluate_match(src, cand_mirage, candidate_url="https://www.amazon.in/Kreo-dp-B0CQYJXHRP")
+        self.assertEqual(st_m, MatchStatus.MISMATCH)
+        self.assertEqual(cat_m, RejectionCategory.MODEL_MISMATCH)
+
+        # Different tier: Surge Ultra
+        cand_ultra = "Surge Ultra Wireless Gaming Controller for PC, 1K Polling Rate, Gyroscope"
+        st_u, _, cat_u, _ = ProductMatcher.evaluate_match(src, cand_ultra, candidate_url="https://www.amazon.in/Kreo-dp-B0GHN2NLG1")
+        self.assertEqual(st_u, MatchStatus.MISMATCH)
+        self.assertEqual(cat_u, RejectionCategory.MODEL_MISMATCH)
+
+        # Different connectivity: Surge LITE Wired
+        cand_lite = "Surge LITE Wired Gaming Controller for PC | Hall Effect Joysticks & Triggers"
+        st_l, _, cat_l, _ = ProductMatcher.evaluate_match(src, cand_lite, candidate_url="https://www.amazon.in/Kreo-dp-B0GYX4H4GW")
+        self.assertEqual(st_l, MatchStatus.CONFIGURATION_MISMATCH)
+        self.assertEqual(cat_l, RejectionCategory.CONFIG_MISMATCH)
+
+        # Different brand: EvoFox Elite X2
+        cand_evofox = "EvoFox Elite X2 Wireless Gaming Controller for PC, Android, TV"
+        st_e, _, cat_e, _ = ProductMatcher.evaluate_match(src, cand_evofox, candidate_url="https://www.amazon.in/EvoFox-dp-B0FC284LX2")
+        self.assertEqual(st_e, MatchStatus.MODEL_MISMATCH)
+        self.assertEqual(cat_e, RejectionCategory.MODEL_MISMATCH)
+
+    # 6. Duplicate listings and missing seller identity
+    def test_duplicate_listings_and_missing_seller_identity(self):
+        from app.retrieval import BaseRetriever
+        class DupRetriever(BaseRetriever):
+            name = "Amazon.in"
+            domain = "amazon.in"
+            is_enabled = True
+            status_reason = "Active"
+            last_http_status = 200
+            last_raw_count = 3
+            last_parsed_count = 3
+            def search(self, query: str, timeout: float = 6.0):
+                return [
+                    {"retailer_name": "Amazon.in", "product_title": "Surge XB Wireless Gaming Controller", "product_url": "https://www.amazon.in/Kreo/dp/B0FLJ5QFZQ", "current_price": 1899.0, "retailer_product_id": "B0FLJ5QFZQ", "seller_name": None},
+                    {"retailer_name": "Amazon.in", "product_title": "Surge XB Wireless Gaming Controller", "product_url": "https://www.amazon.in/Kreo/dp/B0FLJ5QFZQ", "current_price": 1899.0, "retailer_product_id": "B0FLJ5QFZQ", "seller_name": None},
+                    {"retailer_name": "Amazon.in", "product_title": "Surge XB Wireless Gaming Controller Duplicate", "product_url": "https://www.amazon.in/Kreo/dp/B0FLJ5QFZQ", "current_price": 1899.0, "retailer_product_id": "B0FLJ5QFZQ", "seller_name": None},
+                ]
+
+        svc = OfferRetrievalService(retrievers=[DupRetriever()])
+        offers, queried, statuses, q, evals, diags = svc.retrieve_and_match(
+            "Kreo Surge XB Wireless Gaming Controller with Hall Effect, Turbo Mode, RGB Bluetooth, USB Gamepad",
+            source_retailer="Flipkart"
+        )
+        # Should deduplicate to exactly 1 offer
+        self.assertEqual(len(offers), 1)
+
+    # 7. Partial results and one comparison section failing independently
+    def test_partial_results_and_one_comparison_section_failing_independently(self):
+        from app.retrieval import BaseRetriever
+        class FailingAmazonRetriever(BaseRetriever):
+            name = "Amazon.in"
+            domain = "amazon.in"
+            is_enabled = True
+            status_reason = "Blocked: Amazon India returned HTTP 503."
+            last_http_status = 503
+            last_raw_count = 0
+            last_parsed_count = 0
+            def search(self, query: str, timeout: float = 6.0):
+                return []
+
+        class WorkingFlipkartRetriever(BaseRetriever):
+            name = "Flipkart"
+            domain = "flipkart.com"
+            is_enabled = True
+            status_reason = "Active"
+            last_http_status = 200
+            last_raw_count = 1
+            last_parsed_count = 1
+            def search(self, query: str, timeout: float = 6.0):
+                return [
+                    {"retailer_name": "Flipkart", "product_title": "Kreo Surge XB Wireless Gaming Controller", "product_url": "https://www.flipkart.com/kreo/p/itm123", "current_price": 1899.0, "retailer_product_id": "PID123", "seller_name": "RetailNet"}
+                ]
+
+        svc = OfferRetrievalService(retrievers=[WorkingFlipkartRetriever(), FailingAmazonRetriever()])
+        
+        # Section A: cross-platform search fails (Amazon 503)
+        offers, queried, statuses, q, evals, diags = svc.retrieve_and_match(
+            "Kreo Surge XB Wireless Gaming Controller",
+            source_retailer="Flipkart"
+        )
+        self.assertEqual(len(offers), 0)
+        self.assertEqual(diags[0].http_status, 503)
+
+        # Section B: same-platform seller retrieval still succeeds independently
+        same_offers, same_status, same_diags, lowest_p, summary = svc.retrieve_same_platform_sellers(
+            source_title="Kreo Surge XB Wireless Gaming Controller",
+            source_retailer="Flipkart",
+            source_price=1899.0,
+            source_seller="RetailNet",
+            source_product_id="ACCHG3QHWY5EZYHG"
+        )
+        self.assertIn(same_status, ("no_other_sellers_found", "success"))
+        self.assertIsNotNone(summary)
+
+    # 8. Stale results after changing tabs or navigating to another product
+    def test_stale_results_after_changing_tabs_or_navigating(self):
+        svc = OfferRetrievalService()
+        
+        # Request 1: Controller
+        q1 = svc.build_search_query("Kreo Surge XB Wireless Gaming Controller")
+        self.assertIn("Kreo", q1)
+        self.assertNotIn("MacBook", q1)
+        self.assertNotIn("Refrigerator", q1)
+
+        # Request 2: MacBook
+        q2 = svc.build_search_query("Apple 2026 MacBook Air 13-inch with M5 chip 24 GB 1 TB Midnight")
+        self.assertIn("MacBook", q2)
+        self.assertNotIn("Kreo", q2)
+
+        # Request 3: Refrigerator
+        q3 = svc.build_search_query("Samsung 236 L Double Door Refrigerator Elegant Inox")
+        self.assertIn("Refrigerator", q3)
+        self.assertNotIn("MacBook", q3)
+        self.assertNotIn("Kreo", q3)
+
+
+    # 9. Inactive retailers (Croma, Reliance Digital, Vijay Sales) completely removed from active workflow
+    def test_inactive_retailers_strictly_excluded_from_active_comparison_workflow(self):
+        # Service defaults strictly to Flipkart and Amazon.in
+        svc = OfferRetrievalService()
+        active_names = [r.name for r in svc.retrievers]
+        self.assertEqual(active_names, ["Flipkart", "Amazon.in"])
+        self.assertNotIn("Croma", active_names)
+        self.assertNotIn("Reliance Digital", active_names)
+        self.assertNotIn("Vijay Sales", active_names)
+
+        # Full comparison response contains only the active cross-platform retailer
+        amz_src = ComparePricesRequest(
+            source_retailer="Amazon.in",
+            product_title="Apple MacBook Air 13-inch M5",
+            product_url="https://www.amazon.in/dp/B001",
+            current_price=188890.0
+        )
+        res_amz = compare_prices(amz_src)
+        self.assertEqual(res_amz.retailers_queried, ["Flipkart"])
+        for d in res_amz.retailer_diagnostics:
+            self.assertEqual(d.retailer_name, "Flipkart")
+            self.assertNotIn(d.retailer_name, ("Croma", "Reliance Digital", "Vijay Sales"))
+
+        fk_src = ComparePricesRequest(
+            source_retailer="Flipkart",
+            product_title="Nothing Phone 4b (Black, 256 GB)",
+            product_url="https://www.flipkart.com/nothing-phone-4b/p/itm1",
+            current_price=27999.0
+        )
+        res_fk = compare_prices(fk_src)
+        self.assertEqual(res_fk.retailers_queried, ["Amazon.in"])
+        for d in res_fk.retailer_diagnostics:
+            self.assertEqual(d.retailer_name, "Amazon.in")
+            self.assertNotIn(d.retailer_name, ("Croma", "Reliance Digital", "Vijay Sales"))
+
+    # 10. Headphones & Audio Devices category verification
+    def test_audio_category_matching_and_rejection(self):
+        # Exact match with differing title wording
+        src_amz = "Sony WH-1000XM5 Wireless Industry Leading Noise Canceling Headphones, Black"
+        cand_fk = "Sony WH-1000XM5 Bluetooth Headset (Black, Over the Ear)"
+        status, _, cat, vars = ProductMatcher.evaluate_match(src_amz, cand_fk)
+        self.assertEqual(status, MatchStatus.EXACT_MATCH)
+        self.assertEqual(cat, RejectionCategory.VALID_MATCH)
+        self.assertEqual(vars["brand"], "sony")
+        self.assertEqual(vars["model_line"], "wh-1000xm5")
+
+        # Different generation (XM5 vs XM4) -> MODEL_MISMATCH
+        cand_xm4 = "Sony WH-1000XM4 Wireless Noise Canceling Headphones"
+        st_xm4, _, cat_xm4, _ = ProductMatcher.evaluate_match(src_amz, cand_xm4)
+        self.assertEqual(st_xm4, MatchStatus.MODEL_MISMATCH)
+        self.assertEqual(cat_xm4, RejectionCategory.MODEL_MISMATCH)
+
+        # Query construction
+        svc = OfferRetrievalService()
+        q_audio = svc.build_search_query(src_amz)
+        self.assertIn("Sony", q_audio)
+        self.assertIn("WH-1000XM5", q_audio)
+
+    # 11. Monitors & Displays category verification
+    def test_monitors_displays_matching_and_rejection(self):
+        src_mon = "LG UltraGear 27-inch FHD IPS Gaming Monitor (144Hz, 1ms, AMD FreeSync)"
+        cand_mon = "LG 27 inch UltraGear 144Hz Gaming Monitor, IPS Panel, Full HD"
+        status, _, cat, vars = ProductMatcher.evaluate_match(src_mon, cand_mon)
+        self.assertEqual(status, MatchStatus.EXACT_MATCH)
+        self.assertEqual(cat, RejectionCategory.VALID_MATCH)
+        self.assertEqual(vars["brand"], "lg")
+        self.assertEqual(vars["screen_size"], "27-inch")
+        self.assertEqual(vars["refresh_rate"], "144Hz")
+
+        # Screen size mismatch (27-inch vs 24-inch) -> CONFIG_MISMATCH
+        cand_24 = "LG UltraGear 24-inch 144Hz FHD IPS Gaming Monitor"
+        st_sz, _, cat_sz, _ = ProductMatcher.evaluate_match(src_mon, cand_24)
+        self.assertEqual(st_sz, MatchStatus.CONFIGURATION_MISMATCH)
+        self.assertEqual(cat_sz, RejectionCategory.CONFIG_MISMATCH)
+
+        # Refresh rate mismatch (144Hz vs 240Hz) -> CONFIG_MISMATCH
+        cand_240 = "LG UltraGear 27-inch 240Hz FHD IPS Gaming Monitor"
+        st_hz, _, cat_hz, _ = ProductMatcher.evaluate_match(src_mon, cand_240)
+        self.assertEqual(st_hz, MatchStatus.CONFIGURATION_MISMATCH)
+        self.assertEqual(cat_hz, RejectionCategory.CONFIG_MISMATCH)
+
+        # Resolution mismatch (FHD vs 4K) -> CONFIG_MISMATCH
+        cand_4k = "LG UltraGear 27-inch 4K UHD 144Hz Gaming Monitor"
+        st_res, _, cat_res, _ = ProductMatcher.evaluate_match(src_mon, cand_4k)
+        self.assertEqual(st_res, MatchStatus.CONFIGURATION_MISMATCH)
+        self.assertEqual(cat_res, RejectionCategory.CONFIG_MISMATCH)
+
+        # Query construction
+        svc = OfferRetrievalService()
+        q_mon = svc.build_search_query(src_mon)
+        self.assertIn("Lg", q_mon)
+        self.assertIn("Ultragear", q_mon)
+        self.assertIn("27-inch", q_mon)
+        self.assertIn("144Hz", q_mon)
+
+    # 12. Storage Devices & Components category verification
+    def test_storage_components_matching_and_rejection(self):
+        src_ssd = "Crucial P3 Plus 1TB PCIe 4.0 3D NAND NVMe M.2 SSD, up to 5000MB/s"
+        cand_ssd = "Crucial P3 Plus 1 TB Internal Solid State Drive (NVMe M.2 Gen 4)"
+        status, _, cat, vars = ProductMatcher.evaluate_match(src_ssd, cand_ssd)
+        self.assertEqual(status, MatchStatus.EXACT_MATCH)
+        self.assertEqual(cat, RejectionCategory.VALID_MATCH)
+        self.assertEqual(vars["brand"], "crucial")
+        self.assertEqual(vars["storage"], "1 TB")
+        self.assertEqual(vars["model_line"], "p3 plus")
+
+        # Capacity mismatch (1TB vs 2TB) -> CONFIG_MISMATCH
+        cand_2tb = "Crucial P3 Plus 2TB PCIe 4.0 3D NAND NVMe M.2 SSD"
+        st_cap, _, cat_cap, _ = ProductMatcher.evaluate_match(src_ssd, cand_2tb)
+        self.assertEqual(st_cap, MatchStatus.CONFIGURATION_MISMATCH)
+        self.assertEqual(cat_cap, RejectionCategory.CONFIG_MISMATCH)
+
+        # Model tier mismatch (P3 Plus vs P3 base) -> MODEL_MISMATCH
+        cand_p3 = "Crucial P3 1TB PCIe 3.0 3D NAND NVMe M.2 SSD"
+        st_p3, _, cat_p3, _ = ProductMatcher.evaluate_match(src_ssd, cand_p3)
+        self.assertEqual(st_p3, MatchStatus.MISMATCH)
+        self.assertEqual(cat_p3, RejectionCategory.MODEL_MISMATCH)
+
+        # Interface mismatch (NVMe vs SATA) -> CONFIG_MISMATCH
+        cand_sata = "Crucial P3 Plus 1TB Internal SATA SSD"
+        st_sata, _, cat_sata, _ = ProductMatcher.evaluate_match(src_ssd, cand_sata)
+        self.assertEqual(st_sata, MatchStatus.CONFIGURATION_MISMATCH)
+        self.assertEqual(cat_sata, RejectionCategory.CONFIG_MISMATCH)
+
+        # Query construction
+        svc = OfferRetrievalService()
+        q_ssd = svc.build_search_query(src_ssd)
+        self.assertIn("Crucial", q_ssd)
+        self.assertIn("P3 Plus", q_ssd)
+        self.assertIn("1 TB", q_ssd)
+
+    # 13. Everyday Consumer Products (Sports & Household) verification
+    def test_everyday_consumer_products_matching_and_rejection(self):
+        src_fb = "Nivia Storm Football Size 5 (White/Black)"
+        cand_fb = "Nivia Storm Rubber Football - Size: 5 (Black, White)"
+        status, _, cat, vars = ProductMatcher.evaluate_match(src_fb, cand_fb)
+        self.assertEqual(status, MatchStatus.EXACT_MATCH)
+        self.assertEqual(cat, RejectionCategory.VALID_MATCH)
+        self.assertEqual(vars["brand"], "nivia")
+        self.assertEqual(vars["model_line"], "storm")
+        self.assertEqual(vars["item_size"], "Size 5")
+
+        # Size mismatch (Size 5 vs Size 4) -> CONFIG_MISMATCH
+        cand_sz4 = "Nivia Storm Football - Size: 4 (White)"
+        st_sz, _, cat_sz, _ = ProductMatcher.evaluate_match(src_fb, cand_sz4)
+        self.assertEqual(st_sz, MatchStatus.CONFIGURATION_MISMATCH)
+        self.assertEqual(cat_sz, RejectionCategory.CONFIG_MISMATCH)
+
+        # Model line mismatch (Storm vs Shining Star) -> MODEL_MISMATCH
+        cand_star = "Nivia Shining Star Football - Size: 5"
+        st_star, _, cat_star, _ = ProductMatcher.evaluate_match(src_fb, cand_star)
+        self.assertEqual(st_star, MatchStatus.MISMATCH)
+        self.assertEqual(cat_star, RejectionCategory.MODEL_MISMATCH)
+
+        # Query construction
+        svc = OfferRetrievalService()
+        q_fb = svc.build_search_query(src_fb)
+        self.assertIn("Nivia", q_fb)
+        self.assertIn("Storm", q_fb)
+        self.assertIn("Football", q_fb)
+
+
+    # 14. Amazon PA-API 5.0 response parsing and normalization
+    def test_amazon_paapi_response_parsing_and_normalization(self):
+        retriever = AmazonRetriever()
+        paapi_sample = {
+            "SearchResult": {
+                "Items": [
+                    {
+                        "ASIN": "B0FLJ5QFZQ",
+                        "DetailPageURL": "https://www.amazon.in/dp/B0FLJ5QFZQ",
+                        "ItemInfo": {
+                            "Title": {
+                                "DisplayValue": "Kreo Surge XB Wireless Gaming Controller with Hall Effect, Turbo Mode, RGB Bluetooth, USB Gamepad"
+                            }
+                        },
+                        "Images": {
+                            "Primary": {
+                                "Large": {
+                                    "URL": "https://m.media-amazon.com/images/I/71example.jpg"
+                                }
+                            }
+                        },
+                        "Offers": {
+                            "Listings": [
+                                {
+                                    "Price": {
+                                        "Amount": 1899.0,
+                                        "Currency": "INR"
+                                    },
+                                    "MerchantInfo": {
+                                        "Name": "Appario Retail Private Ltd"
+                                    },
+                                    "Availability": {
+                                        "Message": "In Stock"
+                                    }
+                                }
+                            ]
+                        }
+                    }
+                ]
+            }
+        }
+        offers = retriever._parse_paapi_response(paapi_sample)
+        self.assertEqual(len(offers), 1)
+        self.assertEqual(offers[0]["retailer_name"], "Amazon.in")
+        self.assertEqual(offers[0]["retailer_product_id"], "B0FLJ5QFZQ")
+        self.assertEqual(offers[0]["current_price"], 1899.0)
+        self.assertEqual(offers[0]["seller_name"], "Appario Retail Private Ltd")
+        self.assertEqual(offers[0]["availability"], "IN_STOCK")
+        self.assertIn("PA-API", offers[0]["data_source"])
+
+    # 15. Amazon Rainforest API response parsing and normalization
+    def test_amazon_rainforest_response_parsing_and_normalization(self):
+        retriever = AmazonRetriever()
+        rainforest_sample = {
+            "search_results": [
+                {
+                    "title": "Kreo Surge XB Wireless Gaming Controller with Hall Effect, Turbo Mode, RGB Bluetooth, USB Gamepad",
+                    "asin": "B0FLJ5QFZQ",
+                    "link": "https://www.amazon.in/dp/B0FLJ5QFZQ",
+                    "price": {"value": 1899.0},
+                    "rrp": {"value": 4999.0},
+                    "image": "https://m.media-amazon.com/images/I/71example.jpg",
+                    "merchant_info": {"name": "Appario Retail"}
+                }
+            ]
+        }
+        offers = retriever._parse_rainforest_response(rainforest_sample)
+        self.assertEqual(len(offers), 1)
+        self.assertEqual(offers[0]["retailer_name"], "Amazon.in")
+        self.assertEqual(offers[0]["retailer_product_id"], "B0FLJ5QFZQ")
+        self.assertEqual(offers[0]["current_price"], 1899.0)
+        self.assertEqual(offers[0]["mrp"], 4999.0)
+        self.assertEqual(offers[0]["seller_name"], "Appario Retail")
+        self.assertIn("Rainforest", offers[0]["data_source"])
+
+    # 16. Flipkart -> Amazon comparison with verified candidate produces genuine cross-platform offer
+    def test_flipkart_to_amazon_comparison_with_genuine_amazon_candidate(self):
+        fk_source = ComparePricesRequest(
+            source_retailer="Flipkart",
+            product_title="Kreo Surge XB Wireless Gaming Controller with Hall Effect, Turbo Mode, RGB Bluetooth, USB Gamepad",
+            product_url="https://www.flipkart.com/kreo-surge-xb/p/itm9bd006ba2dbca",
+            current_price=1999.0,
+            variant="Wireless · Black"
+        )
+        amz_candidate = [{
+            "retailer_name": "Amazon.in",
+            "product_title": "Kreo Surge XB Wireless Gaming Controller (Black) with Hall Effect, Turbo Mode, RGB Bluetooth, USB Gamepad",
+            "product_url": "https://www.amazon.in/dp/B0FLJ5QFZQ",
+            "current_price": 1899.0,
+            "mrp": 4999.0,
+            "retailer_product_id": "B0FLJ5QFZQ",
+            "availability": "IN_STOCK",
+            "seller_name": "Appario Retail Private Ltd",
+            "data_source": "Amazon Product Advertising API (PA-API v5)"
+        }]
+        retriever = MockRetriever(name="Amazon.in", offers=amz_candidate)
+        with patch("app.main.retrieval_service", OfferRetrievalService(retrievers=[retriever])):
+            resp = compare_prices(fk_source)
+            self.assertEqual(resp.status, "success")
+            self.assertEqual(resp.cross_platform_status, "success")
+            self.assertEqual(resp.verdict_label, "LOWER ON AMAZON.IN")
+            self.assertEqual(len(resp.verified_offers), 1)
+            self.assertEqual(resp.verified_offers[0].retailer_name, "Amazon.in")
+            self.assertEqual(resp.verified_offers[0].current_price, 1899.0)
+            self.assertEqual(resp.price_difference, 100.0) # 1999 - 1899
+
 if __name__ == "__main__":
     unittest.main()
+

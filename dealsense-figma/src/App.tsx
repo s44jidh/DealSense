@@ -63,6 +63,12 @@ export interface ComparableOffer {
   model_identifier?: string | null;
   configuration?: string | null;
   extracted_variants?: Record<string, any>;
+  seller_name?: string | null;
+  delivery_estimate?: string | null;
+  condition?: string | null;
+  price_difference?: number | null;
+  retailer_product_id?: string | null;
+  image_url?: string | null;
 }
 
 export interface RetailerDiagnostic {
@@ -93,6 +99,7 @@ export interface ComparePricesResponse {
   };
   offers: ComparableOffer[];
   verified_offers: ComparableOffer[];
+  possible_offers?: ComparableOffer[];
   lowest_price: number | null;
   lowest_price_retailer: string | null;
   lowest_price_url: string | null;
@@ -105,6 +112,20 @@ export interface ComparePricesResponse {
   retailer_diagnostics?: RetailerDiagnostic[];
   diagnostics?: Record<string, any>;
   message: string;
+
+  // Section A — Other Platform (Cross-Platform)
+  cross_platform_offers?: ComparableOffer[];
+  cross_platform_status?: string;
+  cross_platform_diagnostics?: RetailerDiagnostic[];
+  lowest_verified_cross_platform_price?: number | null;
+  cross_platform_summary?: string | null;
+
+  // Section B — Other Sellers on this Platform (Same-Platform)
+  same_platform_seller_offers?: ComparableOffer[];
+  same_platform_status?: string;
+  same_platform_diagnostics?: RetailerDiagnostic[];
+  lowest_verified_same_platform_price?: number | null;
+  same_platform_summary?: string | null;
 }
 
 export default function App() {
@@ -164,10 +185,21 @@ export default function App() {
     const payload = {
       url: product.url,
       product_name: product.product_name,
+      product_title: product.product_title || product.product_name,
+      product_url: product.product_url || product.url,
       current_site_price: product.current_site_price,
+      current_price: product.current_price || product.current_site_price,
       mrp: product.mrp,
       seller: product.seller,
       variant: product.variant || null,
+      source_retailer: product.source_retailer,
+      retailer_product_id: product.retailer_product_id || null,
+      manufacturer_part_number: product.manufacturer_part_number || null,
+      brand: product.brand || null,
+      model: product.model || null,
+      category: product.category || null,
+      specifications: product.specifications || null,
+      availability: product.availability || null,
     };
 
     // 1. Automatic Listing Analysis (/api/analyze)
@@ -328,6 +360,16 @@ export default function App() {
         // Guard against cross-tab contamination: only accept messages from the active tab
         if (sender?.tab?.id && activeTabIdRef.current && sender.tab.id !== activeTabIdRef.current) {
           return;
+        }
+
+        // Validate sender URL: ensure sender tab URL matches supported domains
+        if (sender?.tab?.url) {
+          try {
+            const senderHost = new URL(sender.tab.url).hostname;
+            if (!senderHost.includes("amazon.in") && !senderHost.includes("flipkart.com")) {
+              return;
+            }
+          } catch {}
         }
 
         if (msg && msg.action === "productUnavailable") {

@@ -130,7 +130,7 @@ function Ready({
         <div>
           <div className="text-[14px] font-semibold text-foreground">No supported product detected</div>
           <p className="mt-1.5 text-[12px] text-muted-foreground leading-relaxed max-w-[280px]">
-            Open an Amazon India (<span className="text-foreground font-medium">amazon.in</span>) product page to inspect deal authenticity, price history, and seller credibility.
+            Open a supported Amazon India or Flipkart product page to analyze pricing and compare offers.
           </p>
         </div>
         <div className="mt-1 flex flex-col gap-2 w-full max-w-[240px]">
@@ -173,7 +173,7 @@ function Ready({
 
   const productName = product.product_name;
   const sellerName = product.seller || "Seller not specified";
-  const storeName = "Amazon.in";
+  const storeName = product.source_retailer || (product.url?.includes("flipkart.com") ? "Flipkart" : "Amazon.in");
   const listedPrice = product.current_site_price;
   const realMrp = product.mrp;
   const variantText = product.variant || null;
@@ -388,106 +388,442 @@ function ComparablePricesSection({
   error?: string | null;
   onCompare?: () => void;
 }) {
-  const verifiedCount = comparison?.verified_offers?.length ?? 0;
-  const uncertainCount = (comparison?.offers?.length ?? 0) - verifiedCount;
+  const isFlipkartSource = Boolean(
+    product.source_retailer === "Flipkart" ||
+    (product.url && product.url.includes("flipkart.com"))
+  );
+  const crossPlatformRetailer = isFlipkartSource ? "Amazon India" : "Flipkart";
+  const samePlatformRetailer = isFlipkartSource ? "Flipkart" : "Amazon India";
+
+  const verifiedCrossOffers =
+    comparison?.cross_platform_offers?.filter(
+      (o) => o.match_status === "EXACT_MATCH" && o.availability !== "OUT_OF_STOCK"
+    ) ??
+    comparison?.verified_offers ??
+    [];
+
+  const possibleCrossOffers =
+    comparison?.cross_platform_offers?.filter(
+      (o) => o.match_status === "POSSIBLE_MATCH" || o.match_status === "UNVERIFIED_VARIANT"
+    ) ??
+    comparison?.possible_offers ??
+    [];
+
+  const samePlatformOffers = comparison?.same_platform_seller_offers ?? [];
+  const samePlatformStatus = comparison?.same_platform_status || (comparison ? "no_other_sellers_found" : "not_queried");
 
   return (
-    <div>
-      <div className="flex items-baseline justify-between mb-2">
-        <div className="text-[10px] font-semibold uppercase tracking-[0.12em] text-muted-foreground">
-          Comparable prices
-        </div>
-        <div className="flex items-center gap-2">
-          <div className="text-[10px] text-muted-foreground">
-            {loading
-              ? "Checking stores..."
-              : comparison?.status === "success" && verifiedCount > 0
-              ? `${verifiedCount} verified offer${verifiedCount > 1 ? "s" : ""}`
-              : comparison?.status === "no_offers_found"
-              ? "No verified offers"
-              : "Not queried"}
+    <div className="flex flex-col gap-3">
+      {/* ======================================================== */}
+      {/* SECTION A: OTHER PLATFORM (Cross-Platform Comparison)   */}
+      {/* ======================================================== */}
+      <div>
+        <div className="flex items-baseline justify-between mb-2">
+          <div className="text-[10px] font-semibold uppercase tracking-[0.12em] text-muted-foreground">
+            Other Platform ({crossPlatformRetailer})
           </div>
-          {onCompare && !loading && comparison ? (
-            <button
-              onClick={onCompare}
-              title="Re-check stores with fresh queries"
-              className="text-[10px] text-muted-foreground hover:text-foreground flex items-center gap-1 transition-colors"
-            >
-              <Refresh width={10} height={10} />
-              Re-check
-            </button>
-          ) : null}
+          <div className="flex items-center gap-2">
+            <div className="text-[10px] text-muted-foreground">
+              {loading
+                ? "Checking stores..."
+                : comparison?.status === "success" && verifiedCrossOffers.length > 0
+                ? `${verifiedCrossOffers.length} verified offer${verifiedCrossOffers.length > 1 ? "s" : ""}`
+                : (comparison?.cross_platform_status || comparison?.status) === "retailer_unavailable"
+                ? "Retailer unavailable"
+                : (comparison?.cross_platform_status || comparison?.status) === "no_search_results"
+                ? "0 listings found"
+                : (comparison?.cross_platform_status || comparison?.status) === "all_candidates_rejected"
+                ? "No exact match"
+                : (comparison?.cross_platform_status || comparison?.status) === "insufficient_data"
+                ? "Unverified listings"
+                : comparison?.status === "no_offers_found" || verifiedCrossOffers.length === 0
+                ? "No verified offers"
+                : "Not queried"}
+            </div>
+            {onCompare && !loading && comparison ? (
+              <button
+                onClick={onCompare}
+                title="Re-check stores with fresh queries"
+                className="text-[10px] text-muted-foreground hover:text-foreground flex items-center gap-1 transition-colors"
+              >
+                <Refresh width={10} height={10} />
+                Re-check
+              </button>
+            ) : null}
+          </div>
         </div>
+
+        {loading ? (
+          <div className="rounded-xl border border-border bg-muted/40 p-4 text-center flex flex-col items-center gap-2.5">
+            <Refresh width={18} height={18} className="animate-spin text-foreground/70" />
+            <div>
+              <div className="text-[12.5px] font-semibold text-foreground">
+                Searching {crossPlatformRetailer}...
+              </div>
+              <p className="mt-0.5 text-[11px] text-muted-foreground">
+                Querying live listings on {crossPlatformRetailer} and verifying exact configuration...
+              </p>
+            </div>
+          </div>
+        ) : error ? (
+          <div className="rounded-xl border border-destructive/30 bg-destructive/10 p-3.5">
+            <div className="flex items-start gap-2">
+              <Warn width={15} height={15} className="mt-0.5 shrink-0 text-destructive" />
+              <div className="min-w-0 flex-1">
+                <div className="text-[11.5px] font-bold uppercase tracking-wider text-destructive">
+                  Comparison Request Failed
+                </div>
+                <p className="mt-0.5 text-[11px] text-foreground/80 leading-relaxed">
+                  {error}
+                </p>
+                {onCompare ? (
+                  <Btn
+                    onClick={onCompare}
+                    variant="outline"
+                    className="mt-2.5 py-1 px-3 text-[11.5px]"
+                  >
+                    Retry comparison
+                  </Btn>
+                ) : null}
+              </div>
+            </div>
+          </div>
+        ) : !comparison ? (
+          <div className="rounded-xl border border-dashed border-border p-3.5 text-center bg-muted/20">
+            <div className="text-[12px] font-semibold text-foreground">
+              Compare real prices on {crossPlatformRetailer}
+            </div>
+            <p className="mt-1 text-[11.5px] text-muted-foreground leading-relaxed">
+              Retrieve genuine live offers from {crossPlatformRetailer} for this exact product configuration.
+            </p>
+            {onCompare ? (
+              <Btn
+                onClick={onCompare}
+                variant="outline"
+                className="mt-3 w-full py-2 text-[12.5px] font-medium"
+              >
+                <Search width={13} height={13} />
+                Compare prices across stores
+              </Btn>
+            ) : null}
+          </div>
+        ) : comparison.status === "no_offers_found" || verifiedCrossOffers.length === 0 ? (
+          <div className={`rounded-xl border p-3.5 flex flex-col gap-2.5 ${
+            (comparison.cross_platform_status || comparison.status) === "retailer_unavailable"
+              ? "border-amber-500/30 bg-amber-500/10"
+              : "border-dashed border-border bg-muted/20"
+          }`}>
+            <div className="flex items-center justify-between">
+              <span className="text-[12px] font-semibold text-foreground">
+                {(comparison.cross_platform_status || comparison.status) === "retailer_unavailable"
+                  ? `Search temporarily unavailable on ${crossPlatformRetailer}`
+                  : (comparison.cross_platform_status || comparison.status) === "no_search_results"
+                  ? `No search results on ${crossPlatformRetailer}`
+                  : (comparison.cross_platform_status || comparison.status) === "all_candidates_rejected"
+                  ? `No exact model match found on ${crossPlatformRetailer}`
+                  : (comparison.cross_platform_status || comparison.status) === "insufficient_data"
+                  ? `Listings found but specifications unverified on ${crossPlatformRetailer}`
+                  : `No verified comparable offers found on ${crossPlatformRetailer}`}
+              </span>
+              <span className={`rounded px-1.5 py-0.5 text-[9px] font-semibold uppercase tracking-wider border ${
+                (comparison.cross_platform_status || comparison.status) === "retailer_unavailable"
+                  ? "bg-amber-500/20 text-amber-700 dark:text-amber-400 border-amber-500/30"
+                  : (comparison.cross_platform_status || comparison.status) === "no_search_results"
+                  ? "bg-background text-muted-foreground border-border"
+                  : (comparison.cross_platform_status || comparison.status) === "all_candidates_rejected"
+                  ? "bg-background text-muted-foreground border-border"
+                  : (comparison.cross_platform_status || comparison.status) === "insufficient_data"
+                  ? "bg-amber-500/15 text-amber-700 dark:text-amber-400 border-amber-500/25"
+                  : "bg-background text-muted-foreground border-border"
+              }`}>
+                {(comparison.cross_platform_status || comparison.status) === "retailer_unavailable"
+                  ? "RETAILER BLOCKED"
+                  : (comparison.cross_platform_status || comparison.status) === "no_search_results"
+                  ? "0 RESULTS"
+                  : (comparison.cross_platform_status || comparison.status) === "all_candidates_rejected"
+                  ? "NO EXACT MATCH"
+                  : (comparison.cross_platform_status || comparison.status) === "insufficient_data"
+                  ? "UNVERIFIED"
+                  : "NO MATCH"}
+              </span>
+            </div>
+            <p className="text-[11.5px] text-muted-foreground leading-relaxed">
+              {comparison.cross_platform_summary || comparison.summary}
+            </p>
+
+            {possibleCrossOffers.length > 0 ? (
+              <div className="flex flex-col gap-2 my-1">
+                <div className="text-[11px] font-semibold text-foreground/90 uppercase tracking-wide">
+                  Potential Matches (Unverified Attributes)
+                </div>
+                {possibleCrossOffers.map((offer, idx) => (
+                  <div key={idx} className="rounded-lg border border-border/80 bg-card p-2.5 text-[11.5px] flex flex-col gap-1 shadow-xs">
+                    <div className="flex items-center justify-between">
+                      <span className="font-semibold text-foreground">{offer.retailer_name}</span>
+                      <span className="rounded bg-amber-500/10 px-1.5 py-0.5 text-[9px] font-semibold uppercase tracking-wider text-amber-600 dark:text-amber-400 border border-amber-500/20">
+                        POSSIBLE MATCH
+                      </span>
+                    </div>
+                    <div className="text-foreground/90 font-medium line-clamp-2 leading-snug">{offer.product_title}</div>
+                    <div className="text-[10.5px] text-muted-foreground mt-0.5 leading-tight">
+                      {offer.match_details || "Core configuration compatible; variant details unverified."}
+                    </div>
+                    <div className="flex items-center justify-between mt-1 pt-1.5 border-t border-border/40">
+                      <span className="font-bold text-[14px]">{INR(offer.current_price)}</span>
+                      <a href={offer.product_url} target="_blank" rel="noopener noreferrer" className="font-semibold underline text-[11px] text-foreground">
+                        View on {offer.retailer_name} ↗
+                      </a>
+                    </div>
+                  </div>
+                ))}
+              </div>
+            ) : null}
+          </div>
+        ) : (
+          <div className="flex flex-col gap-3">
+            {/* Comparison summary verdict */}
+            <div
+              className={`rounded-xl border px-3.5 py-2.5 ${
+                comparison.price_difference != null && comparison.price_difference > 0
+                  ? "border-safe-border bg-safe-soft"
+                  : "border-border bg-muted/40"
+              }`}
+            >
+              <div className="flex items-center justify-between">
+                <span
+                  className={`text-[11.5px] font-bold tracking-wide uppercase ${
+                    comparison.price_difference != null && comparison.price_difference > 0
+                      ? "text-safe"
+                      : "text-foreground"
+                  }`}
+                >
+                  {comparison.verdict_label}
+                </span>
+                <span className="text-[10px] text-muted-foreground font-medium">
+                  Verified Match
+                </span>
+              </div>
+              <p className="mt-1 text-[11.5px] text-foreground/85 leading-relaxed">
+                {comparison.cross_platform_summary || comparison.summary}
+              </p>
+            </div>
+
+            {/* List of verified offers */}
+            <div className="flex flex-col gap-2">
+              {verifiedCrossOffers.map((offer, idx) => {
+                const delta = product.current_site_price - offer.current_price;
+                const isCheaper = delta > 0;
+                return (
+                  <div
+                    key={`${offer.product_url}-${idx}`}
+                    className="rounded-xl border border-border bg-card p-3 shadow-xs flex flex-col gap-1.5"
+                  >
+                    <div className="flex items-center justify-between">
+                      <span className="text-[12.5px] font-bold text-foreground">
+                        {offer.retailer_name}
+                      </span>
+                      <span className="rounded bg-safe-soft px-1.5 py-0.5 text-[9px] font-semibold uppercase tracking-wider text-safe border border-safe-border">
+                        EXACT MATCH
+                      </span>
+                    </div>
+
+                    <div className="text-[12px] font-medium text-foreground/90 line-clamp-2 leading-snug">
+                      {offer.product_title}
+                    </div>
+
+                    {offer.seller_name ? (
+                      <div className="text-[11px] text-muted-foreground">
+                        Sold by <span className="font-semibold text-foreground/85">{offer.seller_name}</span>
+                      </div>
+                    ) : null}
+
+                    <div className="mt-1 flex flex-wrap items-baseline justify-between gap-2">
+                      <div className="flex items-baseline gap-2">
+                        <span className="text-[17px] font-bold text-foreground">
+                          {INR(offer.current_price)}
+                        </span>
+                        {offer.mrp && offer.mrp > offer.current_price ? (
+                          <span className="text-[11px] text-muted-foreground line-through">
+                            MRP {INR(offer.mrp)}
+                          </span>
+                        ) : null}
+                      </div>
+
+                      {delta !== 0 ? (
+                        <span
+                          className={`text-[11px] font-semibold ${
+                            isCheaper ? "text-safe" : "text-muted-foreground"
+                          }`}
+                        >
+                          {isCheaper
+                            ? `Save ${INR(delta)} vs ${samePlatformRetailer}`
+                            : `+${INR(Math.abs(delta))} vs ${samePlatformRetailer}`}
+                        </span>
+                      ) : (
+                        <span className="text-[11px] text-muted-foreground">
+                          Matches {samePlatformRetailer} price
+                        </span>
+                      )}
+                    </div>
+
+                    <div className="mt-1 pt-2 border-t border-border/50 flex items-center justify-between text-[11px]">
+                      <span className="text-muted-foreground">
+                        {offer.delivery_estimate || (offer.availability === "OUT_OF_STOCK" ? "Out of stock" : "Verified live offer")}
+                      </span>
+                      <a
+                        href={offer.product_url}
+                        target="_blank"
+                        rel="noopener noreferrer"
+                        className="font-semibold text-foreground underline underline-offset-3 hover:opacity-80 transition-opacity"
+                      >
+                        View on {offer.retailer_name} ↗
+                      </a>
+                    </div>
+                  </div>
+                );
+              })}
+            </div>
+          </div>
+        )}
       </div>
 
-      {loading ? (
-        <div className="rounded-xl border border-border bg-muted/40 p-4 text-center flex flex-col items-center gap-2.5">
-          <Refresh width={18} height={18} className="animate-spin text-foreground/70" />
-          <div>
-            <div className="text-[12.5px] font-semibold text-foreground">
-              Searching Indian retailers...
+      {/* ======================================================== */}
+      {/* SECTION B: OTHER SELLERS ON THIS PLATFORM                */}
+      {/* ======================================================== */}
+      <div className="mt-2 pt-3 border-t border-border/60">
+        <div className="flex items-baseline justify-between mb-2">
+          <div className="text-[10px] font-semibold uppercase tracking-[0.12em] text-muted-foreground">
+            Other Sellers on this Platform ({samePlatformRetailer})
+          </div>
+          <div className="text-[10px] text-muted-foreground">
+            {loading
+              ? "Checking..."
+              : samePlatformStatus === "success" && samePlatformOffers.length > 0
+              ? `${samePlatformOffers.length} verified seller${samePlatformOffers.length > 1 ? "s" : ""}`
+              : samePlatformStatus === "seller_data_unavailable"
+              ? "Seller data unavailable"
+              : samePlatformStatus === "no_other_sellers_found"
+              ? "Single seller listing"
+              : "Not queried"}
+          </div>
+        </div>
+
+        {loading ? (
+          <div className="rounded-xl border border-border bg-muted/30 p-3 text-center flex items-center justify-center gap-2 text-[11.5px] text-muted-foreground">
+            <Refresh width={14} height={14} className="animate-spin text-foreground/70" />
+            <span>Checking other sellers on {samePlatformRetailer}...</span>
+          </div>
+        ) : !comparison ? (
+          <div className="rounded-xl border border-dashed border-border p-3 text-center bg-muted/20 text-[11.5px] text-muted-foreground">
+            Seller comparisons will appear after price analysis.
+          </div>
+        ) : samePlatformStatus === "seller_data_unavailable" ? (
+          <div className="rounded-xl border border-dashed border-border p-3 bg-muted/20 text-[11.5px] flex flex-col gap-1">
+            <div className="flex items-center justify-between font-semibold text-foreground">
+              <span>Alternative sellers could not be verified</span>
+              <span className="rounded bg-muted px-1.5 py-0.5 text-[9px] uppercase tracking-wider text-muted-foreground border border-border">
+                UNAVAILABLE
+              </span>
             </div>
-            <p className="mt-0.5 text-[11px] text-muted-foreground">
-              Querying live listings on Flipkart and verifying exact configuration...
+            <p className="text-muted-foreground text-[11px] leading-relaxed">
+              Alternative sellers could not be verified from the available retailer data. Public search results do not expose distinct seller identities for this listing.
             </p>
           </div>
-        </div>
-      ) : error ? (
-        <div className="rounded-xl border border-destructive/30 bg-destructive/10 p-3.5">
-          <div className="flex items-start gap-2">
-            <Warn width={15} height={15} className="mt-0.5 shrink-0 text-destructive" />
-            <div className="min-w-0 flex-1">
-              <div className="text-[11.5px] font-bold uppercase tracking-wider text-destructive">
-                Comparison Request Failed
-              </div>
-              <p className="mt-0.5 text-[11px] text-foreground/80 leading-relaxed">
-                {error}
-              </p>
-              {onCompare ? (
-                <Btn
-                  onClick={onCompare}
-                  variant="outline"
-                  className="mt-2.5 py-1 px-3 text-[11.5px]"
-                >
-                  Retry comparison
-                </Btn>
-              ) : null}
+        ) : samePlatformStatus === "no_other_sellers_found" || samePlatformOffers.length === 0 ? (
+          <div className="rounded-xl border border-dashed border-border p-3 bg-muted/20 text-[11.5px] flex flex-col gap-1">
+            <div className="flex items-center justify-between font-semibold text-foreground">
+              <span>No additional verified sellers found</span>
+              <span className="rounded bg-muted px-1.5 py-0.5 text-[9px] uppercase tracking-wider text-muted-foreground border border-border">
+                SINGLE SELLER
+              </span>
             </div>
+            <p className="text-muted-foreground text-[11px] leading-relaxed">
+              {product.seller ? `Current listing is sold by ${product.seller}. ` : ""}No distinct verified alternative sellers were found for this exact model and variant on {samePlatformRetailer}.
+            </p>
           </div>
-        </div>
-      ) : !comparison ? (
-        <div className="rounded-xl border border-dashed border-border p-3.5 text-center bg-muted/20">
-          <div className="text-[12px] font-semibold text-foreground">
-            Compare real prices across stores
-          </div>
-          <p className="mt-1 text-[11.5px] text-muted-foreground leading-relaxed">
-            Retrieve genuine live offers from Flipkart and supported Indian retailers for this exact product configuration.
-          </p>
-          {onCompare ? (
-            <Btn
-              onClick={onCompare}
-              variant="outline"
-              className="mt-3 w-full py-2 text-[12.5px] font-medium"
-            >
-              <Search width={13} height={13} />
-              Compare prices across stores
-            </Btn>
-          ) : null}
-        </div>
-      ) : comparison.status === "no_offers_found" || verifiedCount === 0 ? (
-        <div className="rounded-xl border border-dashed border-border p-3.5 bg-muted/20 flex flex-col gap-2.5">
-          <div className="flex items-center justify-between">
-            <span className="text-[12px] font-semibold text-foreground">
-              No verified comparable offers found
-            </span>
-            <span className="rounded bg-background px-1.5 py-0.5 text-[9px] font-semibold uppercase tracking-wider text-muted-foreground border border-border">
-              NO MATCH
-            </span>
-          </div>
-          <p className="text-[11.5px] text-muted-foreground leading-relaxed">
-            {comparison.summary}
-          </p>
+        ) : (
+          <div className="flex flex-col gap-2">
+            {comparison.same_platform_summary ? (
+              <div className="rounded-lg border border-border/80 bg-muted/30 p-2.5 text-[11px] text-foreground/85">
+                {comparison.same_platform_summary}
+              </div>
+            ) : null}
 
+            {samePlatformOffers.map((offer, idx) => {
+              const delta = product.current_site_price - offer.current_price;
+              const isCheaper = delta > 0;
+              return (
+                <div
+                  key={`seller-${offer.seller_name}-${idx}`}
+                  className="rounded-xl border border-border bg-card p-3 shadow-xs flex flex-col gap-1"
+                >
+                  <div className="flex items-center justify-between">
+                    <span className="text-[12px] font-bold text-foreground">
+                      {offer.seller_name || "Verified Seller"}
+                    </span>
+                    <span className="rounded bg-muted px-1.5 py-0.5 text-[9px] font-semibold uppercase tracking-wider text-muted-foreground border border-border">
+                      {offer.condition || "NEW"}
+                    </span>
+                  </div>
+
+                  <div className="text-[11.5px] text-muted-foreground truncate">
+                    {offer.product_title}
+                  </div>
+
+                  <div className="mt-1 flex items-baseline justify-between">
+                    <div className="flex items-baseline gap-2">
+                      <span className="text-[15px] font-bold text-foreground">
+                        {INR(offer.current_price)}
+                      </span>
+                      {offer.mrp && offer.mrp > offer.current_price ? (
+                        <span className="text-[10.5px] text-muted-foreground line-through">
+                          MRP {INR(offer.mrp)}
+                        </span>
+                      ) : null}
+                    </div>
+
+                    {delta !== 0 ? (
+                      <span
+                        className={`text-[11px] font-semibold ${
+                          isCheaper ? "text-safe" : "text-muted-foreground"
+                        }`}
+                      >
+                        {isCheaper
+                          ? `Save ${INR(delta)} vs current seller`
+                          : `+${INR(Math.abs(delta))} vs current seller`}
+                      </span>
+                    ) : (
+                      <span className="text-[11px] text-muted-foreground">
+                        Matches current seller price
+                      </span>
+                    )}
+                  </div>
+
+                  <div className="mt-1 pt-1.5 border-t border-border/40 flex items-center justify-between text-[10.5px]">
+                    <span className="text-muted-foreground">
+                      {offer.delivery_estimate || "In stock"}
+                    </span>
+                    <a
+                      href={offer.product_url}
+                      target="_blank"
+                      rel="noopener noreferrer"
+                      className="font-semibold text-foreground underline underline-offset-2 hover:opacity-80 transition-opacity"
+                    >
+                      View offer ↗
+                    </a>
+                  </div>
+                </div>
+              );
+            })}
+          </div>
+        )}
+      </div>
+
+      {/* ======================================================== */}
+      {/* DIAGNOSTICS & SUPPORTED STORES ACCORDION                */}
+      {/* ======================================================== */}
+      {comparison && (
+        <div className="mt-1 flex flex-col gap-2">
           {/* Retailer Search & Verification Diagnostics */}
           <div className="rounded-lg border border-border/70 bg-card/60 p-2.5 text-[11px] flex flex-col gap-1.5">
             <div className="flex items-center justify-between text-muted-foreground text-[10px] uppercase font-semibold tracking-wider">
@@ -499,7 +835,6 @@ function ComparablePricesSection({
               ) : null}
             </div>
 
-            {/* List retailer diagnostics */}
             {comparison.retailer_diagnostics && comparison.retailer_diagnostics.length > 0 ? (
               <div className="flex flex-col gap-1 mt-0.5">
                 {comparison.retailer_diagnostics.map((rd) => (
@@ -516,7 +851,7 @@ function ComparablePricesSection({
                     </div>
                     {rd.http_status === 200 && rd.parsed_listings_count > 0 && rd.exact_matches_count === 0 ? (
                       <div className="text-[10px] text-muted-foreground mt-0.5 leading-tight">
-                        {rd.config_mismatch_count > 0 ? `${rd.config_mismatch_count} config mismatch (RAM/GPU/capacity)` : null}
+                        {rd.config_mismatch_count > 0 ? `${rd.config_mismatch_count} config mismatch` : null}
                         {rd.config_mismatch_count > 0 && rd.model_mismatch_count > 0 ? " · " : null}
                         {rd.model_mismatch_count > 0 ? `${rd.model_mismatch_count} model mismatch` : null}
                         {(rd.config_mismatch_count > 0 || rd.model_mismatch_count > 0) && rd.unverified_variant_count > 0 ? " · " : null}
@@ -530,17 +865,26 @@ function ComparablePricesSection({
                   </div>
                 ))}
               </div>
-            ) : (
-              <div className="text-[10.5px] text-muted-foreground">
-                Flipkart queried live; Croma & Reliance Digital restricted.
-              </div>
-            )}
+            ) : null}
           </div>
+
+          <Accordion label="Supported stores status">
+            <div className="flex flex-col gap-1 text-[11px] text-muted-foreground">
+              <div className="flex justify-between py-0.5">
+                <span className="font-medium text-foreground">Amazon India</span>
+                <span className="text-safe">Active · Real-time search & seller retrieval</span>
+              </div>
+              <div className="flex justify-between py-0.5">
+                <span className="font-medium text-foreground">Flipkart</span>
+                <span className="text-safe">Active · Real-time search & seller retrieval</span>
+              </div>
+            </div>
+          </Accordion>
 
           <div className="flex items-center justify-between pt-1 border-t border-border/50 text-[10.5px] text-muted-foreground">
             <span>
               {comparison.retrieval_timestamp
-                ? `Last evaluated: ${new Date(comparison.retrieval_timestamp).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit", second: "2-digit" })}`
+                ? `Evaluated: ${new Date(comparison.retrieval_timestamp).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit", second: "2-digit" })}`
                 : "Live evaluation"}
             </span>
             {onCompare ? (
@@ -555,141 +899,10 @@ function ComparablePricesSection({
             ) : null}
           </div>
         </div>
-      ) : (
-        <div className="flex flex-col gap-3">
-          {/* Comparison summary verdict */}
-          <div
-            className={`rounded-xl border px-3.5 py-2.5 ${
-              comparison.price_difference != null && comparison.price_difference > 0
-                ? "border-safe-border bg-safe-soft"
-                : "border-border bg-muted/40"
-            }`}
-          >
-            <div className="flex items-center justify-between">
-              <span
-                className={`text-[11.5px] font-bold tracking-wide uppercase ${
-                  comparison.price_difference != null && comparison.price_difference > 0
-                    ? "text-safe"
-                    : "text-foreground"
-                }`}
-              >
-                {comparison.verdict_label}
-              </span>
-              <span className="text-[10px] text-muted-foreground font-medium">
-                Verified Match
-              </span>
-            </div>
-            <p className="mt-1 text-[11.5px] text-foreground/85 leading-relaxed">
-              {comparison.summary}
-            </p>
-          </div>
-
-          {/* List of verified offers */}
-          <div className="flex flex-col gap-2">
-            {comparison.verified_offers.map((offer, idx) => {
-              const delta = offer.current_price - product.current_site_price;
-              const isCheaper = delta < 0;
-              return (
-                <div
-                  key={`${offer.product_url}-${idx}`}
-                  className="rounded-xl border border-border bg-card p-3 shadow-xs flex flex-col gap-1.5"
-                >
-                  <div className="flex items-center justify-between">
-                    <span className="text-[12.5px] font-bold text-foreground">
-                      {offer.retailer_name}
-                    </span>
-                    <span className="rounded bg-safe-soft px-1.5 py-0.5 text-[9px] font-semibold uppercase tracking-wider text-safe border border-safe-border">
-                      {offer.match_status === "EXACT_MATCH" ? "EXACT MATCH" : "PROBABLE MATCH"}
-                    </span>
-                  </div>
-
-                  <div className="text-[12px] font-medium text-foreground/90 line-clamp-2 leading-snug">
-                    {offer.product_title}
-                  </div>
-
-                  <div className="mt-1 flex flex-wrap items-baseline justify-between gap-2">
-                    <div className="flex items-baseline gap-2">
-                      <span className="text-[17px] font-bold text-foreground">
-                        {INR(offer.current_price)}
-                      </span>
-                      {offer.mrp && offer.mrp > offer.current_price ? (
-                        <span className="text-[11px] text-muted-foreground line-through">
-                          MRP {INR(offer.mrp)}
-                        </span>
-                      ) : null}
-                    </div>
-
-                    {delta !== 0 ? (
-                      <span
-                        className={`text-[11px] font-semibold ${
-                          isCheaper ? "text-safe" : "text-muted-foreground"
-                        }`}
-                      >
-                        {isCheaper
-                          ? `Save ${INR(Math.abs(delta))} vs Amazon`
-                          : `+${INR(delta)} vs Amazon`}
-                      </span>
-                    ) : (
-                      <span className="text-[11px] text-muted-foreground">
-                        Matches Amazon price
-                      </span>
-                    )}
-                  </div>
-
-                  <div className="mt-1 pt-2 border-t border-border/50 flex items-center justify-between text-[11px]">
-                    <span className="text-muted-foreground">
-                      {offer.availability === "OUT_OF_STOCK"
-                        ? "Out of stock"
-                        : "Verified live offer"}
-                    </span>
-                    <a
-                      href={offer.product_url}
-                      target="_blank"
-                      rel="noopener noreferrer"
-                      className="font-semibold text-foreground underline underline-offset-3 hover:opacity-80 transition-opacity"
-                    >
-                      View on {offer.retailer_name} ↗
-                    </a>
-                  </div>
-                </div>
-              );
-            })}
-          </div>
-
-          {/* Uncertain configuration warning if any was excluded */}
-          {uncertainCount > 0 ? (
-            <p className="text-[10.5px] text-muted-foreground italic leading-tight">
-              * {uncertainCount} candidate listing{uncertainCount > 1 ? "s were" : " was"} excluded from price comparison due to unverified hardware specifications.
-            </p>
-          ) : null}
-
-          {/* Retailer sources disclosure */}
-          <Accordion label="Supported stores & source transparency">
-            <div className="flex flex-col gap-1 text-[11px] text-muted-foreground">
-              <div className="flex justify-between py-0.5 border-b border-border/40">
-                <span className="font-medium text-foreground">Flipkart</span>
-                <span className="text-safe font-medium">Active · Live public search</span>
-              </div>
-              <div className="flex justify-between py-0.5 border-b border-border/40">
-                <span className="font-medium text-foreground">Croma</span>
-                <span>Disabled · Anti-bot protection (403)</span>
-              </div>
-              <div className="flex justify-between py-0.5 border-b border-border/40">
-                <span className="font-medium text-foreground">Reliance Digital</span>
-                <span>Disabled · SPA hydration required</span>
-              </div>
-              <div className="flex justify-between py-0.5">
-                <span className="font-medium text-foreground">Vijay Sales</span>
-                <span>Disabled · Endpoint unavailable (404)</span>
-              </div>
-            </div>
-          </Accordion>
-        </div>
       )}
     </div>
   );
 }
-
 function Result({
   product,
   analysis,
@@ -726,7 +939,7 @@ function Result({
         <div>
           <div className="text-[14px] font-semibold text-foreground">No product data</div>
           <p className="mt-1 text-[12px] text-muted-foreground leading-relaxed">
-            Please open an Amazon India product page to view analysis.
+            Please open a supported Amazon India or Flipkart product page to view analysis.
           </p>
         </div>
         <Btn onClick={() => go("ready")} variant="outline" className="py-2 text-[12.5px]">
@@ -969,7 +1182,7 @@ function Result({
           <div className="flex items-start gap-2.5">
             <span className="mt-[4px] h-1.5 w-1.5 shrink-0 rounded-full bg-border-strong" />
             <span className="text-[12px] text-muted-foreground leading-snug">
-              {pa ? pa.summary : "Extracted live from Amazon.in listing."}
+              {pa ? pa.summary : `Extracted live from ${product.source_retailer || (product.url?.includes("flipkart.com") ? "Flipkart" : "Amazon.in")} listing.`}
             </span>
           </div>
           <div className="flex items-start gap-2.5">
