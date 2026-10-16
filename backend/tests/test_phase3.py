@@ -384,6 +384,54 @@ class DealSenseStrictMatchingTests(unittest.TestCase):
             self.assertEqual(res2.lowest_price, 26990.0)
             self.assertEqual(res2.price_difference, 1000.0)
 
+    # 20. Nivia football query strictly rejects Dell laptop candidates and preserves source product identity
+    def test_20_football_comparison_rejects_laptop_and_preserves_identity(self):
+        # Candidate returned from retailer is a Dell Alienware laptop (e.g. from broad search or ad)
+        cand = [{
+            "retailer_name": "Flipkart",
+            "product_title": "Dell Alienware m16 R2 Gaming Laptop Intel Core Ultra 9",
+            "product_url": "https://www.flipkart.com/dell-alienware/p/itm1",
+            "current_price": 149990.0,
+            "availability": "IN_STOCK",
+        }]
+        retriever = MockRetriever(name="Flipkart", offers=cand)
+        with patch("app.main.retrieval_service", OfferRetrievalService(retrievers=[retriever])):
+            res = compare_prices(ComparePricesRequest(
+                url="https://www.amazon.in/dp/B00KVEB182",
+                product_name="Nivia Storm Football - Rubber, Size 5",
+                current_site_price=399.0,
+                mrp=500.0,
+            ))
+            # Source product MUST strictly echo the football product
+            self.assertEqual(res.source_product.product_name, "Nivia Storm Football - Rubber, Size 5")
+            self.assertEqual(res.source_product.current_site_price, 399.0)
+            self.assertEqual(res.source_product.url, "https://www.amazon.in/dp/B00KVEB182")
+            # Dell laptop candidate must be rejected (MODEL_MISMATCH or category mismatch)
+            self.assertEqual(res.status, "no_offers_found")
+            self.assertEqual(len(res.verified_offers), 0)
+            self.assertIsNone(res.lowest_price)
+
+    # 21. Deterministic source_product integrity across sequential requests
+    def test_21_source_product_integrity_sequential(self):
+        dell_req = ComparePricesRequest(
+            url="https://www.amazon.in/dp/B0D5BXYZ12",
+            product_name="Dell Alienware m16 R2 Gaming Laptop",
+            current_site_price=149990.0,
+        )
+        football_req = ComparePricesRequest(
+            url="https://www.amazon.in/dp/B00KVEB182",
+            product_name="Nivia Storm Football - Size 5",
+            current_site_price=399.0,
+        )
+        retriever = MockRetriever(name="Flipkart", offers=[])
+        with patch("app.main.retrieval_service", OfferRetrievalService(retrievers=[retriever])):
+            dell_res = compare_prices(dell_req)
+            football_res = compare_prices(football_req)
+
+            self.assertEqual(dell_res.source_product.product_name, "Dell Alienware m16 R2 Gaming Laptop")
+            self.assertEqual(football_res.source_product.product_name, "Nivia Storm Football - Size 5")
+            self.assertNotEqual(dell_res.source_product.product_name, football_res.source_product.product_name)
+
 
 if __name__ == "__main__":
     unittest.main()

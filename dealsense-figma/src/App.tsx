@@ -132,6 +132,7 @@ export default function App() {
   // Guard against out-of-order or late responses from previous products
   const currentRequestIdRef = useRef<number>(0);
   const activeProductKeyRef = useRef<string>("");
+  const activeTabIdRef = useRef<number | null>(null);
 
   useEffect(() => {
     document.documentElement.classList.toggle("dark", dark);
@@ -146,18 +147,19 @@ export default function App() {
   /**
    * Automatically executes listing price analysis and cross-store comparison.
    * Cancels in-flight requests if product changes. Discards stale responses.
+   * Atomically clears previous product analysis and comparison state immediately.
    */
   const runAutoAnalysis = useCallback(async (product: ExtractedProduct, isManualRecheck = false) => {
     const reqId = ++currentRequestIdRef.current;
     const targetKey = `${product.url}::${product.product_name}::${product.current_site_price}::${product.variant || ""}`;
     activeProductKeyRef.current = targetKey;
 
+    // Invalidate and clear previous product results immediately
+    setAnalysisResult(null);
     setAnalysisError(null);
+    setComparisonResult(null);
     setComparisonError(null);
     setComparisonLoading(true);
-    if (isManualRecheck) {
-      setComparisonResult(null);
-    }
 
     const payload = {
       url: product.url,
@@ -191,6 +193,8 @@ export default function App() {
         }
         const data = (await res.json()) as AnalyzeResponse;
         if (reqId !== currentRequestIdRef.current || targetKey !== activeProductKeyRef.current) return;
+        // Verify response product matches target product to prevent state leakage
+        if (data.product_name && data.product_name !== product.product_name) return;
         setAnalysisResult(data);
         setAnalysisError(null);
       })
@@ -232,6 +236,10 @@ export default function App() {
 
       const data = (await res.json()) as ComparePricesResponse;
       if (reqId !== currentRequestIdRef.current || targetKey !== activeProductKeyRef.current) return;
+      // Invariant: verify source product identity matches current product
+      if (data.source_product?.product_name && data.source_product.product_name !== product.product_name) {
+        return;
+      }
       setComparisonResult(data);
       setComparisonError(null);
     } catch (err) {
@@ -248,15 +256,19 @@ export default function App() {
 
   // Extract live Amazon India product from the active browser tab
   const runExtraction = useCallback(async () => {
-    setExtractionStatus("loading");
-    // Invalidate any in-flight comparison or analysis requests
+    // Invalidate any in-flight comparison or analysis requests immediately
     currentRequestIdRef.current += 1;
-    // Clear stale analysis and comparison whenever a new product extraction begins
+    activeProductKeyRef.current = "";
+
+    // Clear stale product, analysis, and comparison immediately whenever a new product extraction begins
+    setExtractedProduct(null);
     setAnalysisResult(null);
     setAnalysisError(null);
     setComparisonResult(null);
     setComparisonLoading(false);
     setComparisonError(null);
+    setExtractionStatus("loading");
+    setView("ready");
 
     try {
       const product = await extractActiveTabProduct();
@@ -265,7 +277,7 @@ export default function App() {
         activeProductKeyRef.current = prodKey;
         setExtractedProduct(product);
         setExtractionStatus("success");
-        // Automatically display analysis & comparison results
+        // Automatically transition to result view and trigger analysis
         setView("result");
         runAutoAnalysis(product);
       } else {
@@ -283,27 +295,61 @@ export default function App() {
     }
   }, [runAutoAnalysis]);
 
-  // Monitor tab changes, URL updates, and content script variant change events
+  // Monitor active tab changes, URL updates, and content script variant events
   useEffect(() => {
-    runExtraction();
+    if (typeof chrome !== "undefined" && chrome.tabs?.query) {
+      chrome.tabs.query({ active: true, currentWindow: true }, (tabs: any[]) => {
+        if (tabs && tabs[0]?.id) {
+          activeTabIdRef.current = tabs[0].id;
+        }
+        runExtraction();
+      });
+    } else {
+      runExtraction();
+    }
 
     if (typeof chrome !== "undefined") {
-      const handleTabActivated = () => {
+      const handleTabActivated = (activeInfo: any) => {
+        if (activeInfo?.tabId) {
+          activeTabIdRef.current = activeInfo.tabId;
+        }
         runExtraction();
       };
 
-      const handleTabUpdated = (_tabId: number, changeInfo: any) => {
+      const handleTabUpdated = (tabId: number, changeInfo: any) => {
+        // Discard updates from background tabs
+        if (activeTabIdRef.current && tabId !== activeTabIdRef.current) return;
         if (changeInfo.status === "complete" || changeInfo.url) {
           runExtraction();
         }
       };
 
-      const handleRuntimeMessage = (msg: any) => {
+      const handleRuntimeMessage = (msg: any, sender: any) => {
+        // Guard against cross-tab contamination: only accept messages from the active tab
+        if (sender?.tab?.id && activeTabIdRef.current && sender.tab.id !== activeTabIdRef.current) {
+          return;
+        }
+
+        if (msg && msg.action === "productUnavailable") {
+          currentRequestIdRef.current += 1;
+          activeProductKeyRef.current = "";
+          setExtractedProduct(null);
+          setAnalysisResult(null);
+          setAnalysisError(null);
+          setComparisonResult(null);
+          setComparisonLoading(false);
+          setComparisonError(null);
+          setExtractionStatus("unsupported");
+          setView("ready");
+          return;
+        }
+
         if (msg && msg.action === "productUpdated" && msg.data) {
           const product = msg.data as ExtractedProduct;
           if (product && product.product_name && product.current_site_price > 0) {
             const prodKey = `${product.url}::${product.product_name}::${product.current_site_price}::${product.variant || ""}`;
             if (prodKey !== activeProductKeyRef.current) {
+              activeProductKeyRef.current = prodKey;
               setExtractedProduct(product);
               setExtractionStatus("success");
               setView("result");

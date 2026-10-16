@@ -2,6 +2,7 @@ declare const chrome: any;
 
 export interface ExtractedProduct {
   url: string;
+  asin?: string | null;
   product_name: string;
   current_site_price: number;
   mrp: number | null;
@@ -94,7 +95,7 @@ export async function extractActiveTabProduct(): Promise<ExtractedProduct | null
   }
 }
 
-function isValidExtractedProduct(p: any): p is ExtractedProduct {
+export function isValidExtractedProduct(p: any): p is ExtractedProduct {
   return (
     typeof p === "object" &&
     p !== null &&
@@ -108,60 +109,115 @@ function isValidExtractedProduct(p: any): p is ExtractedProduct {
 }
 
 /**
- * Pure DOM extraction function executed in the tab context
+ * Pure DOM extraction function executed in the tab context.
+ * Uses strict scoping to #productTitle, core price containers, and ASIN verification.
  */
-function extractAmazonFromDOM() {
+export function extractAmazonFromDOM(): ExtractedProduct | null {
   const hostname = window.location.hostname;
   if (!hostname.includes("amazon.in")) {
     return null;
   }
 
-  // 1. Title
-  const titleEl =
-    document.querySelector("#productTitle") ||
-    document.querySelector("#title") ||
-    document.querySelector("meta[property=\"og:title\"]") ||
-    document.querySelector("#item_name");
-
-  let productName = null;
-  if (titleEl) {
-    const rawTitle =
-      titleEl.tagName === "META"
-        ? titleEl.getAttribute("content")
-        : titleEl.textContent;
-    if (rawTitle) {
-      productName = rawTitle.trim().replace(/\s+/g, " ");
-    }
+  // 1. Title strictly from #productTitle
+  const titleEl = document.querySelector("#productTitle");
+  if (!titleEl) {
+    return null;
   }
-
-  if (!productName) {
+  const rawTitle = titleEl.textContent || "";
+  const productName = rawTitle.trim().replace(/\s+/g, " ");
+  if (!productName || productName.length === 0) {
     return null;
   }
 
-  // 2. Selling Price
-  let price = null;
+  // 2. ASIN and Canonical URL
+  let asin: string | null = null;
+  try {
+    const urlMatch = window.location.pathname.match(/\/(?:dp|gp\/product|product|ASIN)\/([A-Z0-9]{10})(?:[/?]|$)/i);
+    if (urlMatch && urlMatch[1]) {
+      asin = urlMatch[1].toUpperCase();
+    }
+  } catch (e) {}
+
+  if (!asin) {
+    const asinInput = document.querySelector("#ASIN, input[name=\"ASIN\"], #dp[data-asin]");
+    if (asinInput) {
+      const val = (asinInput.getAttribute("value") || asinInput.getAttribute("data-asin") || "").trim();
+      if (/^[A-Z0-9]{10}$/i.test(val)) {
+        asin = val.toUpperCase();
+      }
+    }
+  }
+
+  if (!asin) {
+    const cerberus = document.querySelector("#cerberus-data-metrics[data-asin]");
+    if (cerberus) {
+      const val = (cerberus.getAttribute("data-asin") || "").trim();
+      if (/^[A-Z0-9]{10}$/i.test(val)) {
+        asin = val.toUpperCase();
+      }
+    }
+  }
+
+  if (!asin) {
+    return null;
+  }
+
+  const url = `https://www.amazon.in/dp/${asin}`;
+
+  // 3. Selling Price - Scoped strictly to main product core price containers
+  let price: number | null = null;
+  const mainPriceContainers = [
+    document.querySelector("#corePriceDisplay_desktop_feature_div"),
+    document.querySelector("#corePrice_desktop"),
+    document.querySelector("#corePrice_feature_div"),
+    document.querySelector("#apex_desktop"),
+    document.querySelector("#desktop_unifiedPrice"),
+    document.querySelector("#price"),
+    document.querySelector("#centerCol .priceToPay"),
+    document.querySelector("#centerCol .apexPriceToPay"),
+    document.querySelector("#ppd .priceToPay"),
+    document.querySelector("#desktop_buybox .priceToPay"),
+  ].filter(Boolean);
+
   const priceSelectors = [
     ".apexPriceToPay .a-offscreen",
     ".priceToPay .a-offscreen",
-    "#corePriceDisplay_desktop_feature_div .a-price.aok-align-center .a-offscreen",
-    "#corePrice_desktop .a-price .a-offscreen",
-    "#corePrice_feature_div .a-price .a-offscreen",
+    ".a-price.aok-align-center .a-offscreen",
+    ".a-price .a-offscreen",
     "#priceblock_ourprice",
     "#priceblock_dealprice",
     "#priceblock_saleprice",
     "#tp_price_block_total_price_ww .a-offscreen",
-    ".a-price .a-offscreen",
   ];
 
-  for (const selector of priceSelectors) {
-    const el = document.querySelector(selector);
-    if (el && el.textContent) {
-      const cleaned = el.textContent.replace(/,/g, "").replace(/[^\d.]/g, " ").trim();
-      const match = cleaned.match(/\d+(?:\.\d+)?/);
-      if (match) {
-        const num = parseFloat(match[0]);
-        if (!isNaN(num) && num > 0) {
-          price = num;
+  for (const container of mainPriceContainers) {
+    for (const selector of priceSelectors) {
+      const el = container!.querySelector(selector);
+      if (el && el.textContent) {
+        const parsed = parsePrice(el.textContent);
+        if (parsed !== null) {
+          price = parsed;
+          break;
+        }
+      }
+    }
+    if (price !== null) break;
+  }
+
+  if (price === null) {
+    for (const container of mainPriceContainers) {
+      const wholeEl =
+        container!.querySelector(".priceToPay .a-price-whole") ||
+        container!.querySelector(".a-price-whole");
+      if (wholeEl && wholeEl.textContent) {
+        const whole = wholeEl.textContent.replace(/,/g, "").replace(/[^\d]/g, "");
+        const fractionEl = wholeEl.parentElement
+          ? wholeEl.parentElement.querySelector(".a-price-fraction")
+          : null;
+        const fraction = fractionEl && fractionEl.textContent ? fractionEl.textContent.trim() : "00";
+        const combined = parseFloat(`${whole}.${fraction}`);
+        if (!isNaN(combined) && combined > 0) {
+          price = combined;
           break;
         }
       }
@@ -169,33 +225,17 @@ function extractAmazonFromDOM() {
   }
 
   if (price === null) {
-    const wholeEl =
-      document.querySelector(".priceToPay .a-price-whole") ||
-      document.querySelector("#corePriceDisplay_desktop_feature_div .a-price-whole") ||
-      document.querySelector(".a-price .a-price-whole");
-    if (wholeEl && wholeEl.textContent) {
-      const whole = wholeEl.textContent.replace(/,/g, "").replace(/[^\d]/g, "");
-      const fractionEl = wholeEl.parentElement
-        ? wholeEl.parentElement.querySelector(".a-price-fraction")
-        : null;
-      const fraction = fractionEl && fractionEl.textContent ? fractionEl.textContent.trim() : "00";
-      const combined = parseFloat(`${whole}.${fraction}`);
-      if (!isNaN(combined) && combined > 0) {
-        price = combined;
-      }
-    }
-  }
-
-  if (price === null) {
     return null;
   }
 
-  // 3. MRP (Maximum Retail Price / List Price)
+  // 4. MRP
   const mrp = extractAmazonMrp(document, price);
 
-  // 4. Seller
-  let seller = null;
-  const sellerLink = document.querySelector("#sellerProfileTriggerId");
+  // 5. Seller
+  let seller: string | null = null;
+  const sellerLink = document.querySelector(
+    "#desktop_buybox #sellerProfileTriggerId, #rightCol #sellerProfileTriggerId, #sellerProfileTriggerId"
+  );
   if (sellerLink && sellerLink.textContent) {
     seller = sellerLink.textContent.trim();
   }
@@ -210,7 +250,9 @@ function extractAmazonFromDOM() {
   }
 
   if (!seller) {
-    const merchantEl = document.querySelector("#merchant-info");
+    const merchantEl = document.querySelector(
+      "#rightCol #merchant-info, #desktop_buybox #merchant-info, #merchant-info"
+    );
     if (merchantEl && merchantEl.textContent) {
       const text = merchantEl.textContent.trim();
       const match = text.match(
@@ -227,18 +269,15 @@ function extractAmazonFromDOM() {
     }
   }
 
-  // 5. Product Image
+  // 6. Image
   const image = extractAmazonImage(document);
 
-  // 6. Product Variant
+  // 7. Variant
   const variant = extractAmazonVariant(document);
-
-  // 7. URL
-  const canonicalEl = document.querySelector("link[rel=\"canonical\"]");
-  const url = (canonicalEl && canonicalEl.getAttribute("href")) || window.location.href;
 
   return {
     url,
+    asin,
     product_name: productName,
     current_site_price: price,
     mrp: mrp || null,
@@ -258,7 +297,6 @@ function extractAmazonFromDOM() {
       "item_package_quantity",
     ];
 
-    // Strategy 1: Modern inline-twister expanded dimension values
     for (const dim of twisterDimensionIds) {
       const el = doc.querySelector(`#inline-twister-expanded-dimension-text-${dim}`);
       if (el && el.textContent) {
@@ -269,7 +307,6 @@ function extractAmazonFromDOM() {
       }
     }
 
-    // Strategy 2: Classic variation labels with .selection or dropdown prompt
     if (parts.length === 0) {
       for (const dim of twisterDimensionIds) {
         const el =
@@ -285,7 +322,6 @@ function extractAmazonFromDOM() {
       }
     }
 
-    // Strategy 3: Dropdown selection options if any
     for (const dim of twisterDimensionIds) {
       const selectEl = doc.querySelector(`select[name="dropdown_selected_${dim}"]`) as HTMLSelectElement | null;
       if (selectEl && selectEl.selectedIndex >= 0) {
@@ -299,7 +335,6 @@ function extractAmazonFromDOM() {
       }
     }
 
-    // Strategy 4: Active swatch text
     if (parts.length === 0) {
       const swatches = doc.querySelectorAll(".swatches .swatchSelect, ul.a-unordered-list li.swatchSelect");
       for (const el of Array.from(swatches)) {
@@ -318,72 +353,77 @@ function extractAmazonFromDOM() {
     return null;
   }
 
-  function extractAmazonImage(doc: Document) {
+  function extractAmazonImage(doc: Document): string | null {
+    const mainImageContainers = [
+      doc.querySelector("#main-image-container"),
+      doc.querySelector("#imgTagWrapperId"),
+      doc.querySelector("#imageBlock"),
+      doc.querySelector("#leftCol"),
+      doc.querySelector("#ppd"),
+    ].filter(Boolean);
+
     const candidateSelectors = [
       "#landingImage",
       "#imgBlkFront",
       "#ebooks-img-blk-front",
       "#main-image",
-      "#main-image-container img",
-      "#imgTagWrapperId img",
     ];
 
-    for (const selector of candidateSelectors) {
-      const imgEl = doc.querySelector(selector);
-      if (imgEl) {
-        // 1. High-resolution image via data-old-hires
-        const hires = imgEl.getAttribute("data-old-hires");
-        if (hires && isValidUrl(hires)) {
-          return hires.trim();
-        }
-
-        // 2. High-resolution image via data-a-dynamic-image
-        const dynamic = imgEl.getAttribute("data-a-dynamic-image");
-        if (dynamic) {
-          try {
-            const parsed = JSON.parse(dynamic);
-            const urls = Object.keys(parsed);
-            if (urls.length > 0) {
-              urls.sort((a, b) => {
-                const dimA = Array.isArray(parsed[a]) ? parsed[a][0] * parsed[a][1] : 0;
-                const dimB = Array.isArray(parsed[b]) ? parsed[b][0] * parsed[b][1] : 0;
-                return dimB - dimA;
-              });
-              if (isValidUrl(urls[0])) {
-                return urls[0].trim();
-              }
-            }
-          } catch {
-            // ignore JSON parse error
+    for (const container of mainImageContainers) {
+      for (const selector of candidateSelectors) {
+        const imgEl = container!.querySelector(selector);
+        if (imgEl) {
+          const hires = imgEl.getAttribute("data-old-hires");
+          if (hires && isValidUrl(hires)) {
+            return hires.trim();
           }
-        }
 
-        // 3. Fallback to src attribute
-        const src = imgEl.getAttribute("src");
-        if (src && isValidUrl(src)) {
-          return src.trim();
+          const dynamic = imgEl.getAttribute("data-a-dynamic-image");
+          if (dynamic) {
+            try {
+              const parsed = JSON.parse(dynamic);
+              const urls = Object.keys(parsed);
+              if (urls.length > 0) {
+                urls.sort((a, b) => {
+                  const dimA = Array.isArray(parsed[a]) ? parsed[a][0] * parsed[a][1] : 0;
+                  const dimB = Array.isArray(parsed[b]) ? parsed[b][0] * parsed[b][1] : 0;
+                  return dimB - dimA;
+                });
+                if (isValidUrl(urls[0])) {
+                  return urls[0].trim();
+                }
+              }
+            } catch {}
+          }
+
+          const src = imgEl.getAttribute("src");
+          if (src && isValidUrl(src)) {
+            return src.trim();
+          }
         }
       }
     }
 
-    // 4. OpenGraph image fallback
-    const ogImage = doc.querySelector('meta[property="og:image"]')?.getAttribute("content");
-    if (ogImage && isValidUrl(ogImage)) {
-      return ogImage.trim();
+    const directLanding = doc.querySelector("#landingImage, #imgBlkFront");
+    if (directLanding) {
+      const hires = directLanding.getAttribute("data-old-hires");
+      if (hires && isValidUrl(hires)) return hires.trim();
+      const src = directLanding.getAttribute("src");
+      if (src && isValidUrl(src)) return src.trim();
     }
 
     return null;
   }
 
-  function isValidUrl(url: string | null): boolean {
-    if (!url || typeof url !== "string") return false;
-    const trimmed = url.trim();
+  function isValidUrl(u: string | null): boolean {
+    if (!u || typeof u !== "string") return false;
+    const trimmed = u.trim();
     if (!trimmed.startsWith("http://") && !trimmed.startsWith("https://")) return false;
     if (trimmed.includes("transparent-pixel") || trimmed.includes("grey-pixel")) return false;
     return true;
   }
 
-  function extractAmazonMrp(doc: Document, sellingPrice: number | null) {
+  function extractAmazonMrp(doc: Document, sellingPrice: number | null): number | null {
     const candidateContainers = [
       doc.querySelector("#corePriceDisplay_desktop_feature_div"),
       doc.querySelector("#corePrice_desktop"),
@@ -393,9 +433,8 @@ function extractAmazonFromDOM() {
       doc.querySelector("#price"),
     ].filter(Boolean);
 
-    // Strategy 1: Check .basisPrice containers
     for (const container of candidateContainers) {
-      const basisEls = container!.querySelectorAll(".basisPrice, [data-csa-c-element-id*='basisPrice']");
+      const basisEls = container!.querySelectorAll(".basisPrice, [data-csa-c-element-id*=\"basisPrice\"]");
       for (const basisEl of Array.from(basisEls)) {
         const text = basisEl.textContent || "";
         if (!/save|coupon|emi|cashback/i.test(text)) {
@@ -408,10 +447,9 @@ function extractAmazonFromDOM() {
       }
     }
 
-    // Strategy 2: Strike-through price elements labelled with M.R.P. or List Price
     for (const container of candidateContainers) {
       const strikeEls = container!.querySelectorAll(
-        'span.a-text-price[data-a-strike="true"], span.a-price.a-text-price, span.a-text-strike'
+        "span.a-text-price[data-a-strike=\"true\"], span.a-price.a-text-price, span.a-text-strike"
       );
       for (const strikeEl of Array.from(strikeEls)) {
         const parent = strikeEl.closest("tr, div, span.a-size-small, li");
@@ -429,7 +467,6 @@ function extractAmazonFromDOM() {
       }
     }
 
-    // Strategy 3: Price table rows labelled with M.R.P.
     for (const container of candidateContainers) {
       const rows = container!.querySelectorAll("tr");
       for (const row of Array.from(rows)) {
@@ -446,7 +483,6 @@ function extractAmazonFromDOM() {
       }
     }
 
-    // Strategy 4: Legacy priceblock_listprice
     const legacyEl = doc.querySelector("#priceblock_listprice, span#priceblock_listprice, #listPrice");
     if (legacyEl && legacyEl.textContent) {
       const val = parsePrice(legacyEl.textContent);
@@ -455,10 +491,9 @@ function extractAmazonFromDOM() {
       }
     }
 
-    // Strategy 5: Core price container strike price fallback
     const primaryDisplay = doc.querySelector("#corePriceDisplay_desktop_feature_div");
     if (primaryDisplay) {
-      const strikeSpan = primaryDisplay.querySelector('span.a-text-price[data-a-strike="true"] .a-offscreen');
+      const strikeSpan = primaryDisplay.querySelector("span.a-text-price[data-a-strike=\"true\"] .a-offscreen");
       if (strikeSpan && strikeSpan.textContent) {
         const val = parsePrice(strikeSpan.textContent);
         if (val !== null && (!sellingPrice || val >= sellingPrice)) {
@@ -470,7 +505,7 @@ function extractAmazonFromDOM() {
     return null;
   }
 
-  function parsePrice(text: string | null) {
+  function parsePrice(text: string | null): number | null {
     if (!text) return null;
     const cleaned = text.replace(/,/g, "").replace(/[^\d.]/g, " ").trim();
     const match = cleaned.match(/\d+(?:\.\d+)?/);

@@ -740,7 +740,18 @@ function Result({
   const displayPrice = product.current_site_price;
   const sellerName = product.seller || "Seller not specified";
   const variantText = product.variant || null;
-  const pa = analysis?.price_analysis;
+
+  // Strict consistency guards: ensure analysis and comparison refer strictly to the currently rendered product
+  const isAnalysisConsistent = Boolean(
+    analysis && (!analysis.product_name || analysis.product_name === productName)
+  );
+  const isComparisonConsistent = Boolean(
+    comparison && (!comparison.source_product?.product_name || comparison.source_product.product_name === productName)
+  );
+
+  const activeAnalysis = isAnalysisConsistent ? analysis : null;
+  const activeComparison = isComparisonConsistent ? comparison : null;
+  const pa = activeAnalysis?.price_analysis;
 
   // Determine verdict visual styling
   let verdictBorderClass = "border-border bg-muted/40";
@@ -927,7 +938,7 @@ function Result({
             neutral={!pa || (pa.status !== "DISCOUNT_VERIFIED" && pa.status !== "PRICE_EXCEEDS_MRP")}
           />
           <QuickRow
-            label={`Seller — ${analysis?.seller_analysis?.seller || sellerName}`}
+            label={`Seller — ${activeAnalysis?.seller_analysis?.seller || sellerName}`}
             value="Reputation unverified"
             neutral
           />
@@ -944,7 +955,7 @@ function Result({
       {/* Comparable stores */}
       <ComparablePricesSection
         product={product}
-        comparison={comparison}
+        comparison={activeComparison}
         loading={comparisonLoading}
         error={comparisonError}
         onCompare={onComparePrices}
@@ -977,7 +988,7 @@ function Result({
                   <span className="text-foreground">Unverified</span>
                 </div>
                 <p className="mt-1 text-[11px] italic leading-relaxed">
-                  {analysis?.reviews_analysis?.summary ||
+                  {activeAnalysis?.reviews_analysis?.summary ||
                     "Sentiment and authenticity analysis will be available in an upcoming update."}
                 </p>
               </div>
@@ -991,7 +1002,7 @@ function Result({
                 <div className="flex justify-between">
                   <span>Seller</span>
                   <span className="text-foreground font-medium">
-                    {analysis?.seller_analysis?.seller || sellerName}
+                    {activeAnalysis?.seller_analysis?.seller || sellerName}
                   </span>
                 </div>
                 <div className="flex justify-between">
@@ -1003,7 +1014,7 @@ function Result({
                   <span className="text-foreground">Amazon India</span>
                 </div>
                 <p className="mt-1 text-[11px] italic leading-relaxed">
-                  {analysis?.seller_analysis?.summary ||
+                  {activeAnalysis?.seller_analysis?.summary ||
                     "Seller history and credibility are unverified."}
                 </p>
               </div>
