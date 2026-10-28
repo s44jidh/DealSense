@@ -3,157 +3,62 @@ declare const chrome: any;
 import { useEffect, useRef, useState, useCallback } from "react";
 import { ScreenRouter, type View } from "./components/screens";
 import { Sun, Moon, Settings, Logo } from "./components/icons";
-import { extractActiveTabProduct, type ExtractedProduct } from "./lib/extractor";
+import {
+  extractActiveTabProduct,
+  type ExtractedProduct,
+} from "./lib/extractor";
+import type {
+  BatchReviewAnalysisResponse,
+  ExtractedReview,
+  ComparePricesResponse,
+} from "./lib/reviewTypes";
+import {
+  SAMPLE_REVIEWS_BATCH,
+  DEMO_PRODUCT_NAME,
+  DEMO_PRICE,
+  DEMO_MRP,
+} from "./lib/sampleReviews";
 
 const API_BASE = "http://127.0.0.1:8000";
 
-export interface PriceAnalysis {
-  status: string;
-  selling_price: number;
-  mrp: number | null;
-  discount_amount: number | null;
-  discount_percent: number | null;
-  verdict_label: string;
-  summary: string;
-}
-
-export interface SellerAnalysis {
-  status: string;
-  seller: string | null;
-  summary: string;
-}
-
-export interface ReviewsAnalysis {
-  status: string;
-  summary: string;
-}
-
-export interface MarketComparison {
-  status: string;
-  summary: string;
-}
-
-export interface AnalyzeResponse {
-  status: string;
-  product_name: string;
-  current_site_price: number;
-  mrp: number | null;
-  seller: string | null;
-  url: string;
-  price_analysis: PriceAnalysis;
-  seller_analysis: SellerAnalysis;
-  reviews_analysis: ReviewsAnalysis;
-  market_comparison: MarketComparison;
-  message: string;
-}
-
-export interface ComparableOffer {
-  retailer_name: string;
-  product_title: string;
-  product_url: string;
-  current_price: number;
-  mrp: number | null;
-  currency: string;
-  match_status: string;
-  match_details?: string | null;
-  rejection_category?: string | null;
-  retrieval_timestamp: string;
-  availability?: string | null;
-  shipping_cost?: number | null;
-  model_identifier?: string | null;
-  configuration?: string | null;
-  extracted_variants?: Record<string, any>;
-  seller_name?: string | null;
-  delivery_estimate?: string | null;
-  condition?: string | null;
-  price_difference?: number | null;
-  retailer_product_id?: string | null;
-  image_url?: string | null;
-}
-
-export interface RetailerDiagnostic {
-  retailer_name: string;
-  search_query: string;
-  http_status: number | null;
-  status_reason: string;
-  raw_listings_count: number;
-  parsed_listings_count: number;
-  valid_price_count: number;
-  price_failed_count: number;
-  model_mismatch_count: number;
-  config_mismatch_count: number;
-  unverified_variant_count: number;
-  condition_mismatch_count: number;
-  exact_matches_count: number;
-  rejection_breakdown: Record<string, number>;
-}
-
-export interface ComparePricesResponse {
-  status: string;
-  source_product: {
-    product_name: string;
-    current_site_price: number;
-    mrp: number | null;
-    url: string;
-    variant?: string | null;
-  };
-  offers: ComparableOffer[];
-  verified_offers: ComparableOffer[];
-  possible_offers?: ComparableOffer[];
-  lowest_price: number | null;
-  lowest_price_retailer: string | null;
-  lowest_price_url: string | null;
-  price_difference: number | null;
-  verdict_label: string;
-  summary: string;
-  retrieval_timestamp: string;
-  retailers_queried: string[];
-  retailer_statuses: Record<string, string>;
-  retailer_diagnostics?: RetailerDiagnostic[];
-  diagnostics?: Record<string, any>;
-  message: string;
-
-  // Section A — Other Platform (Cross-Platform)
-  cross_platform_offers?: ComparableOffer[];
-  cross_platform_status?: string;
-  cross_platform_diagnostics?: RetailerDiagnostic[];
-  lowest_verified_cross_platform_price?: number | null;
-  cross_platform_summary?: string | null;
-
-  // Section B — Other Sellers on this Platform (Same-Platform)
-  same_platform_seller_offers?: ComparableOffer[];
-  same_platform_status?: string;
-  same_platform_diagnostics?: RetailerDiagnostic[];
-  lowest_verified_same_platform_price?: number | null;
-  same_platform_summary?: string | null;
-}
-
 export default function App() {
   const [dark, setDark] = useState(() => {
-    const saved = typeof localStorage !== "undefined" ? localStorage.getItem("sg-theme") : null;
+    const saved =
+      typeof localStorage !== "undefined" ? localStorage.getItem("sg-theme") : null;
     if (saved) return saved === "dark";
-    return typeof matchMedia !== "undefined" && matchMedia("(prefers-color-scheme: dark)").matches;
+    return (
+      typeof matchMedia !== "undefined" &&
+      matchMedia("(prefers-color-scheme: dark)").matches
+    );
   });
+
   const [view, setView] = useState<View>("ready");
   const [prevView, setPrevView] = useState<View>("ready");
-  const [extractedProduct, setExtractedProduct] = useState<ExtractedProduct | null>(null);
+  const [extractedProduct, setExtractedProduct] =
+    useState<ExtractedProduct | null>(null);
   const [extractionStatus, setExtractionStatus] = useState<
     "loading" | "success" | "unsupported" | "error"
   >("loading");
 
-  // Persistent backend listing analysis state
-  const [analysisResult, setAnalysisResult] = useState<AnalyzeResponse | null>(null);
-  const [analysisError, setAnalysisError] = useState<string | null>(null);
+  // Review analysis state
+  const [reviewAnalysis, setReviewAnalysis] =
+    useState<BatchReviewAnalysisResponse | null>(null);
+  const [reviewLoading, setReviewLoading] = useState(false);
+  const [reviewError, setReviewError] = useState<string | null>(null);
 
-  // Persistent cross-store price comparison state
-  const [comparisonResult, setComparisonResult] = useState<ComparePricesResponse | null>(null);
+  // Price comparison state
+  const [comparison, setComparison] = useState<ComparePricesResponse | null>(null);
   const [comparisonLoading, setComparisonLoading] = useState(false);
   const [comparisonError, setComparisonError] = useState<string | null>(null);
 
-  // Guard against out-of-order or late responses from previous products
+  // Analysis source tracking: "live_dom" | "demo" | "manual" (Requirement 6 & 7)
+  const [analysisSource, setAnalysisSource] = useState<
+    "live_dom" | "demo" | "manual"
+  >("live_dom");
+  const [isDemoMode, setIsDemoMode] = useState<boolean>(false);
+
   const currentRequestIdRef = useRef<number>(0);
   const activeProductKeyRef = useRef<string>("");
-  const activeTabIdRef = useRef<number | null>(null);
 
   useEffect(() => {
     document.documentElement.classList.toggle("dark", dark);
@@ -166,355 +71,395 @@ export default function App() {
   };
 
   /**
-   * Automatically executes listing price analysis and cross-store comparison.
-   * Cancels in-flight requests if product changes. Discards stale responses.
-   * Atomically clears previous product analysis and comparison state immediately.
+   * Run review batch analysis against the FastAPI backend
    */
-  const runAutoAnalysis = useCallback(async (product: ExtractedProduct, isManualRecheck = false) => {
-    const reqId = ++currentRequestIdRef.current;
-    const targetKey = `${product.url}::${product.product_name}::${product.current_site_price}::${product.variant || ""}`;
-    activeProductKeyRef.current = targetKey;
+  const runReviewAnalysis = useCallback(
+    async (
+      product: ExtractedProduct,
+      customReviews?: ExtractedReview[],
+      source: "live_dom" | "demo" | "manual" = "live_dom",
+      directToResult: boolean = true
+    ) => {
+      const reqId = ++currentRequestIdRef.current;
+      const targetKey = `${product.url}::${product.product_name}`;
+      activeProductKeyRef.current = targetKey;
 
-    // Invalidate and clear previous product results immediately
-    setAnalysisResult(null);
-    setAnalysisError(null);
-    setComparisonResult(null);
-    setComparisonError(null);
-    setComparisonLoading(true);
+      setReviewError(null);
+      setReviewLoading(true);
+      if (directToResult) {
+        setView("analyzing");
+      }
 
-    const payload = {
-      url: product.url,
-      product_name: product.product_name,
-      product_title: product.product_title || product.product_name,
-      product_url: product.product_url || product.url,
-      current_site_price: product.current_site_price,
-      current_price: product.current_price || product.current_site_price,
-      mrp: product.mrp,
-      seller: product.seller,
-      variant: product.variant || null,
-      source_retailer: product.source_retailer,
-      retailer_product_id: product.retailer_product_id || null,
-      manufacturer_part_number: product.manufacturer_part_number || null,
-      brand: product.brand || null,
-      model: product.model || null,
-      category: product.category || null,
-      specifications: product.specifications || null,
-      availability: product.availability || null,
-    };
+      const reviewsToSend = customReviews || product.reviews || [];
 
-    // 1. Automatic Listing Analysis (/api/analyze)
-    fetch(`${API_BASE}/api/analyze`, {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify(payload),
-    })
-      .then(async (res) => {
-        if (reqId !== currentRequestIdRef.current || targetKey !== activeProductKeyRef.current) return;
-        if (!res.ok) {
-          let errText = `Server returned HTTP ${res.status}`;
-          try {
-            const errJson = await res.json();
-            if (errJson?.detail) {
-              errText = Array.isArray(errJson.detail)
-                ? errJson.detail.map((d: any) => d.msg || JSON.stringify(d)).join("; ")
-                : String(errJson.detail);
-            }
-          } catch {}
-          setAnalysisError(errText);
-          return;
-        }
-        const data = (await res.json()) as AnalyzeResponse;
-        if (reqId !== currentRequestIdRef.current || targetKey !== activeProductKeyRef.current) return;
-        // Verify response product matches target product to prevent state leakage
-        if (data.product_name && data.product_name !== product.product_name) return;
-        setAnalysisResult(data);
-        setAnalysisError(null);
-      })
-      .catch((err) => {
-        if (reqId !== currentRequestIdRef.current || targetKey !== activeProductKeyRef.current) return;
-        console.warn("[DealSense] Automatic analysis connection failed:", err);
-        setAnalysisError("Could not connect to DealSense backend at http://127.0.0.1:8000. Ensure the server is running.");
+      // Debug logging (Requirement 7)
+      console.log("[DealSense Debug Backend Request]", {
+        title: product.product_name,
+        asin: product.asin || product.retailer_product_id || "N/A",
+        url: product.url,
+        reviewCount: reviewsToSend.length,
+        source,
       });
 
-    // 2. Automatic Cross-Store Comparison (/api/compare-prices)
+      const payload = {
+        product_name: product.product_name,
+        url: product.url,
+        source_retailer: product.source_retailer || "Amazon.in",
+        reviews: reviewsToSend.map((r, i) => ({
+          id: r.id || `rev_${i + 1}`,
+          text: r.text,
+          rating: r.rating ?? null,
+          title: r.title ?? null,
+          author: r.author || "Customer",
+          date: r.date ?? null,
+          verified_purchase: r.verified_purchase ?? null,
+        })),
+      };
+
+      try {
+        const res = await fetch(`${API_BASE}/api/reviews/analyze-batch`, {
+          method: "POST",
+          headers: {
+            "Content-Type": "application/json",
+          },
+          body: JSON.stringify(payload),
+        });
+
+        if (reqId !== currentRequestIdRef.current) return;
+
+        if (!res.ok) {
+          const errData = await res.json().catch(() => ({}));
+          throw new Error(
+            errData.detail || `Server returned HTTP ${res.status}`
+          );
+        }
+
+        const data: BatchReviewAnalysisResponse = await res.json();
+
+        // Debug logging (Requirement 7)
+        console.log("[DealSense Debug Backend Response]", {
+          title: data.product_name,
+          asin: product.asin || product.retailer_product_id || "N/A",
+          totalAnalyzed: data.total_reviews_analyzed,
+          overallSentiment: data.overall_sentiment_label,
+          trustScore: data.trust_score,
+          suspiciousCount: data.suspicious_analysis.suspicious_count,
+          source,
+        });
+
+        setReviewAnalysis(data);
+        setReviewLoading(false);
+        if (directToResult) {
+          setView("result");
+        }
+      } catch (err: any) {
+        if (reqId !== currentRequestIdRef.current) return;
+        setReviewLoading(false);
+        const msg =
+          err.message && err.message.includes("Failed to fetch")
+            ? "Cannot connect to DealSense FastAPI backend at http://127.0.0.1:8000. Please ensure the local backend server is running."
+            : err.message || "Review analysis failed.";
+        setReviewError(msg);
+        if (directToResult) {
+          setView("result");
+        }
+      }
+    },
+    []
+  );
+
+  /**
+   * Run cross-store price comparison against the FastAPI backend
+   */
+  const handleComparePrices = useCallback(async (product: ExtractedProduct, customQuery?: string) => {
+    if (!product || !product.product_name) return;
+    setComparisonLoading(true);
+    setComparisonError(null);
     try {
-      const res = await fetch(`${API_BASE}/api/compare-prices?_t=${Date.now()}`, {
+      const payload = {
+        product_name: product.product_name,
+        product_title: product.product_title || product.product_name,
+        url: product.url,
+        product_url: product.product_url || product.url,
+        current_site_price: product.current_site_price,
+        current_price: product.current_price || product.current_site_price,
+        mrp: product.mrp,
+        seller: product.seller,
+        variant: product.variant || null,
+        source_retailer: product.source_retailer,
+        retailer_product_id: product.retailer_product_id || product.asin || null,
+        brand: product.brand || null,
+        model: product.model || null,
+        category: product.category || null,
+        specifications: product.specifications || null,
+        custom_query: customQuery || null,
+      };
+      const res = await fetch(`${API_BASE}/api/compare-prices`, {
         method: "POST",
-        headers: {
-          "Content-Type": "application/json",
-          "Cache-Control": "no-cache",
-          "Pragma": "no-cache",
-        },
-        cache: "no-store",
+        headers: { "Content-Type": "application/json" },
         body: JSON.stringify(payload),
       });
-
-      if (reqId !== currentRequestIdRef.current || targetKey !== activeProductKeyRef.current) return;
-
       if (!res.ok) {
-        let errText = `Server returned HTTP ${res.status}`;
-        try {
-          const errJson = await res.json();
-          if (errJson?.detail) {
-            errText = Array.isArray(errJson.detail)
-              ? errJson.detail.map((d: any) => d.msg || JSON.stringify(d)).join("; ")
-              : String(errJson.detail);
-          }
-        } catch {}
-        setComparisonResult(null);
-        setComparisonError(errText);
-        return;
+        const errJson = await res.json().catch(() => ({}));
+        throw new Error(errJson.detail || `Server returned HTTP ${res.status}`);
       }
-
-      const data = (await res.json()) as ComparePricesResponse;
-      if (reqId !== currentRequestIdRef.current || targetKey !== activeProductKeyRef.current) return;
-      // Invariant: verify source product identity matches current product
-      if (data.source_product?.product_name && data.source_product.product_name !== product.product_name) {
-        return;
-      }
-      setComparisonResult(data);
-      setComparisonError(null);
-    } catch (err) {
-      if (reqId !== currentRequestIdRef.current || targetKey !== activeProductKeyRef.current) return;
-      console.warn("[DealSense] Automatic comparison connection failed:", err);
-      setComparisonResult(null);
-      setComparisonError("Could not connect to DealSense comparison backend at http://127.0.0.1:8000. Ensure the server is running.");
-    } finally {
-      if (reqId === currentRequestIdRef.current && targetKey === activeProductKeyRef.current) {
-        setComparisonLoading(false);
-      }
+      const data: ComparePricesResponse = await res.json();
+      setComparison(data);
+      setComparisonLoading(false);
+    } catch (err: any) {
+      setComparisonLoading(false);
+      setComparisonError(err.message || "Comparison request failed.");
     }
   }, []);
 
-  // Extract live Amazon India product from the active browser tab
-  const runExtraction = useCallback(async () => {
-    // Invalidate any in-flight comparison or analysis requests immediately
-    currentRequestIdRef.current += 1;
-    activeProductKeyRef.current = "";
-
-    // Clear stale product, analysis, and comparison immediately whenever a new product extraction begins
-    setExtractedProduct(null);
-    setAnalysisResult(null);
-    setAnalysisError(null);
-    setComparisonResult(null);
-    setComparisonLoading(false);
-    setComparisonError(null);
+  /**
+   * Scan the active browser tab on load (Requirement 1, 2, 7)
+   */
+  const scanActiveTab = useCallback(async () => {
     setExtractionStatus("loading");
-    setView("ready");
+    setReviewError(null);
+    setReviewAnalysis(null);
+    setComparison(null);
+    setComparisonError(null);
+    setIsDemoMode(false);
+    setAnalysisSource("live_dom");
 
     try {
-      const product = await extractActiveTabProduct();
-      if (product && product.product_name && product.current_site_price > 0) {
-        const prodKey = `${product.url}::${product.product_name}::${product.current_site_price}::${product.variant || ""}`;
-        activeProductKeyRef.current = prodKey;
-        setExtractedProduct(product);
-        setExtractionStatus("success");
-        // Automatically transition to result view and trigger analysis
-        setView("result");
-        runAutoAnalysis(product);
-      } else {
-        activeProductKeyRef.current = "";
+      const prod = await extractActiveTabProduct();
+      if (!prod) {
         setExtractedProduct(null);
         setExtractionStatus("unsupported");
-        setView("ready");
+        console.warn("[DealSense Debug] Active tab is not a supported Amazon or Flipkart product page");
+        return;
       }
-    } catch (err) {
-      activeProductKeyRef.current = "";
-      console.warn("[DealSense] Product extraction failed:", err);
-      setExtractedProduct(null);
-      setExtractionStatus("error");
-      setView("ready");
-    }
-  }, [runAutoAnalysis]);
 
-  // Monitor active tab changes, URL updates, and content script variant events
-  useEffect(() => {
-    if (typeof chrome !== "undefined" && chrome.tabs?.query) {
-      chrome.tabs.query({ active: true, currentWindow: true }, (tabs: any[]) => {
-        if (tabs && tabs[0]?.id) {
-          activeTabIdRef.current = tabs[0].id;
-        }
-        runExtraction();
+      setExtractedProduct(prod);
+      setExtractionStatus("success");
+
+      // Auto-trigger price comparison
+      handleComparePrices(prod);
+
+      // Debug logging (Requirement 7)
+      console.log("[DealSense Debug Scan Success]", {
+        title: prod.product_name,
+        asin: prod.asin || prod.retailer_product_id || "N/A",
+        url: prod.url,
+        price: prod.current_site_price,
+        reviewCount: prod.reviews ? prod.reviews.length : 0,
+        source: "live_dom",
       });
-    } else {
-      runExtraction();
+    } catch (e) {
+      console.warn("[DealSense Debug] Extraction error:", e);
+      setExtractionStatus("error");
+    }
+  }, [handleComparePrices]);
+
+  useEffect(() => {
+    scanActiveTab();
+
+    if (typeof chrome !== "undefined" && chrome.tabs) {
+      const handleActivated = () => {
+        scanActiveTab();
+      };
+      const handleUpdated = (_tabId: number, changeInfo: any) => {
+        if (changeInfo.status === "complete") {
+          scanActiveTab();
+        }
+      };
+      if (chrome.tabs.onActivated) {
+        chrome.tabs.onActivated.addListener(handleActivated);
+      }
+      if (chrome.tabs.onUpdated) {
+        chrome.tabs.onUpdated.addListener(handleUpdated);
+      }
     }
 
-    if (typeof chrome !== "undefined") {
-      const handleTabActivated = (activeInfo: any) => {
-        if (activeInfo?.tabId) {
-          activeTabIdRef.current = activeInfo.tabId;
-        }
-        runExtraction();
-      };
-
-      const handleTabUpdated = (tabId: number, changeInfo: any) => {
-        // Discard updates from background tabs
-        if (activeTabIdRef.current && tabId !== activeTabIdRef.current) return;
-        if (changeInfo.status === "complete" || changeInfo.url) {
-          runExtraction();
-        }
-      };
-
-      const handleRuntimeMessage = (msg: any, sender: any) => {
-        // Guard against cross-tab contamination: only accept messages from the active tab
-        if (sender?.tab?.id && activeTabIdRef.current && sender.tab.id !== activeTabIdRef.current) {
-          return;
-        }
-
-        // Validate sender URL: ensure sender tab URL matches supported domains
-        if (sender?.tab?.url) {
-          try {
-            const senderHost = new URL(sender.tab.url).hostname;
-            if (!senderHost.includes("amazon.in") && !senderHost.includes("flipkart.com")) {
-              return;
-            }
-          } catch {}
-        }
-
-        if (msg && msg.action === "productUnavailable") {
-          currentRequestIdRef.current += 1;
-          activeProductKeyRef.current = "";
-          setExtractedProduct(null);
-          setAnalysisResult(null);
-          setAnalysisError(null);
-          setComparisonResult(null);
-          setComparisonLoading(false);
-          setComparisonError(null);
-          setExtractionStatus("unsupported");
-          setView("ready");
-          return;
-        }
-
+    if (
+      typeof chrome !== "undefined" &&
+      chrome.runtime &&
+      chrome.runtime.onMessage
+    ) {
+      const listener = (msg: any) => {
         if (msg && msg.action === "productUpdated" && msg.data) {
-          const product = msg.data as ExtractedProduct;
-          if (product && product.product_name && product.current_site_price > 0) {
-            const prodKey = `${product.url}::${product.product_name}::${product.current_site_price}::${product.variant || ""}`;
-            if (prodKey !== activeProductKeyRef.current) {
-              activeProductKeyRef.current = prodKey;
-              setExtractedProduct(product);
-              setExtractionStatus("success");
-              setView("result");
-              runAutoAnalysis(product);
-            }
-          }
+          setExtractedProduct(msg.data);
+          setExtractionStatus("success");
+          setReviewAnalysis(null);
+          setIsDemoMode(false);
+          setAnalysisSource("live_dom");
+          console.log("[DealSense Debug Dynamic Update]", {
+            title: msg.data.product_name,
+            asin: msg.data.asin || "N/A",
+            reviewCount: msg.data.reviews?.length ?? 0,
+            source: "live_dom",
+          });
+        } else if (msg && msg.action === "productUnavailable") {
+          setExtractedProduct(null);
+          setExtractionStatus("unsupported");
+          setReviewAnalysis(null);
         }
       };
-
-      chrome.tabs?.onActivated?.addListener(handleTabActivated);
-      chrome.tabs?.onUpdated?.addListener(handleTabUpdated);
-      chrome.runtime?.onMessage?.addListener(handleRuntimeMessage);
-
+      chrome.runtime.onMessage.addListener(listener);
       return () => {
-        chrome.tabs?.onActivated?.removeListener(handleTabActivated);
-        chrome.tabs?.onUpdated?.removeListener(handleTabUpdated);
-        chrome.runtime?.onMessage?.removeListener(handleRuntimeMessage);
+        chrome.runtime.onMessage.removeListener(listener);
       };
     }
-  }, [runExtraction, runAutoAnalysis]);
+  }, [scanActiveTab]);
 
-  const handleManualRefresh = () => {
-    if (extractedProduct) {
-      runAutoAnalysis(extractedProduct, true);
-    } else {
-      runExtraction();
+  /**
+   * Primary action on Ready screen: analyze reviews (Requirement 3, 4, 5, 6)
+   * Strictly uses only reviews belonging to the detected product.
+   * If reviews cannot be retrieved, displays honest error state.
+   */
+  const handleAnalyze = useCallback(() => {
+    if (!extractedProduct) return;
+    const reviews = extractedProduct.reviews || [];
+
+    console.log("[DealSense Debug Analyze Triggered]", {
+      title: extractedProduct.product_name,
+      asin: extractedProduct.asin || extractedProduct.retailer_product_id || "N/A",
+      url: extractedProduct.url,
+      reviewCount: reviews.length,
+      source: isDemoMode ? "demo" : "live_dom",
+    });
+
+    if (reviews.length === 0) {
+      // Requirement 5: If review extraction fails, show clear honest state rather than dummy reviews
+      setReviewError(
+        "Could not retrieve customer reviews from this page. Please ensure customer reviews are visible (scroll down on Amazon if needed), then click Retry."
+      );
+      setReviewAnalysis(null);
+      setView("result");
+      return;
     }
-  };
+
+    // Requirement 3 & 4: Collect ONLY reviews belonging to the detected product
+    runReviewAnalysis(extractedProduct, reviews, isDemoMode ? "demo" : "live_dom", true);
+  }, [extractedProduct, isDemoMode, runReviewAnalysis]);
+
+  /**
+   * Dedicated Demo Mode loader - explicitly isolated (Requirement 6)
+   */
+  const handleLoadDemoReviews = useCallback(() => {
+    setIsDemoMode(true);
+    setAnalysisSource("demo");
+
+    const demoProd: ExtractedProduct = {
+      source_retailer: "Amazon.in",
+      product_name: `[DEMO DATASET] ${DEMO_PRODUCT_NAME}`,
+      url: "https://www.amazon.in/dp/B09XS7JWHH",
+      current_site_price: DEMO_PRICE,
+      mrp: DEMO_MRP,
+      seller: "Appario Retail Pvt Ltd",
+      asin: "B09XS7JWHH",
+      retailer_product_id: "B09XS7JWHH",
+      image:
+        "https://images.unsplash.com/photo-1546435770-a3e426bf472b?w=200&h=200&fit=crop&auto=format",
+      reviews: SAMPLE_REVIEWS_BATCH,
+    };
+
+    setExtractedProduct(demoProd);
+    setExtractionStatus("success");
+
+    console.log("[DealSense Debug Demo Loaded]", {
+      title: demoProd.product_name,
+      asin: demoProd.asin,
+      reviewCount: SAMPLE_REVIEWS_BATCH.length,
+      source: "demo",
+    });
+
+    runReviewAnalysis(demoProd, SAMPLE_REVIEWS_BATCH, "demo", true);
+  }, [runReviewAnalysis]);
+
+  /**
+   * Handle manual review paste fallback (Requirement 5)
+   */
+  const handleAnalyzeCustomReviews = useCallback(
+    (reviews: ExtractedReview[]) => {
+      setIsDemoMode(false);
+      setAnalysisSource("manual");
+
+      const baseProduct: ExtractedProduct = extractedProduct || {
+        source_retailer: "Amazon.in",
+        product_name: "Custom Customer Review Batch",
+        url: "https://www.amazon.in",
+        current_site_price: 0,
+        mrp: null,
+        seller: "Manual Input",
+      };
+
+      console.log("[DealSense Debug Manual Input]", {
+        title: baseProduct.product_name,
+        reviewCount: reviews.length,
+        source: "manual",
+      });
+
+      runReviewAnalysis(baseProduct, reviews, "manual", true);
+    },
+    [extractedProduct, runReviewAnalysis]
+  );
 
   return (
     <div className="w-[410px] min-h-[480px] bg-background text-foreground flex flex-col font-sans select-none">
       {/* popup header */}
-      <header className="flex items-center justify-between border-b border-border bg-card px-4 py-3">
-        <button
-          onClick={handleManualRefresh}
-          className="flex items-center gap-2 hover:opacity-85 transition-opacity"
-          aria-label="DealSense Home"
-        >
-          <Logo size={22} />
-          <span className="text-[17px] font-bold tracking-tight">DealSense</span>
-        </button>
-        <div className="flex items-center gap-2">
-          {/* sliding capsule theme toggle */}
-          <div className="relative flex items-center rounded-full border border-border bg-muted p-[3px] gap-0.5">
-            <div
-              className={`pointer-events-none absolute top-[3px] bottom-[3px] rounded-full bg-card shadow-sm transition-all duration-300 ${
-                dark ? "left-[calc(50%-1px)] right-[3px]" : "left-[3px] right-[calc(50%-1px)]"
-              }`}
-            />
-            <button
-              onClick={() => setDark(false)}
-              aria-label="Light mode"
-              className={`relative z-10 flex h-[22px] w-[22px] items-center justify-center rounded-full transition-colors ${
-                !dark ? "text-foreground" : "text-muted-foreground"
-              }`}
-            >
-              <Sun width={12} height={12} />
-            </button>
-            <button
-              onClick={() => setDark(true)}
-              aria-label="Dark mode"
-              className={`relative z-10 flex h-[22px] w-[22px] items-center justify-center rounded-full transition-colors ${
-                dark ? "text-foreground" : "text-muted-foreground"
-              }`}
-            >
-              <Moon width={12} height={12} />
-            </button>
+      <header className="flex items-center justify-between border-b border-border px-4 py-3 shrink-0">
+        <div className="flex items-center gap-2.5">
+          <Logo size={26} />
+          <div>
+            <div className="flex items-center gap-1.5">
+              <span className="text-[13.5px] font-bold tracking-tight text-foreground">
+                DealSense
+              </span>
+              <span className="rounded bg-primary/10 border border-primary/20 px-1 py-0.2 text-[8px] font-extrabold uppercase tracking-wider text-primary">
+                Review AI
+              </span>
+            </div>
+            <div className="text-[9.5px] text-muted-foreground font-medium">
+              Fake & Suspicious Review Detection
+            </div>
           </div>
-          <IconBtn
-            label="Settings"
-            active={view === "settings"}
-            onClick={() => go("settings")}
+        </div>
+
+        <div className="flex items-center gap-1">
+          <button
+            onClick={() => setDark(!dark)}
+            className="flex h-7 w-7 items-center justify-center rounded-lg text-muted-foreground hover:bg-muted hover:text-foreground transition"
+            title="Toggle Theme"
+          >
+            {dark ? <Sun width={15} height={15} /> : <Moon width={15} height={15} />}
+          </button>
+          <button
+            onClick={() => go(view === "settings" ? prevView : "settings")}
+            className="flex h-7 w-7 items-center justify-center rounded-lg text-muted-foreground hover:bg-muted hover:text-foreground transition"
+            title="Settings"
           >
             <Settings width={15} height={15} />
-          </IconBtn>
+          </button>
         </div>
       </header>
 
-      {/* body */}
-      <main className="pop-scroll max-h-[500px] min-h-[380px] overflow-y-auto flex-1">
+      {/* screen router */}
+      <main className="flex-1 overflow-y-auto">
         <ScreenRouter
           product={extractedProduct}
           status={extractionStatus}
           view={view}
           go={go}
           prevView={prevView}
-          onAnalyze={handleManualRefresh}
-          onRetry={runExtraction}
-          apiPromise={null}
-          analysis={analysisResult}
-          error={analysisError}
-          comparison={comparisonResult}
+          onAnalyze={handleAnalyze}
+          onRetry={scanActiveTab}
+          reviewAnalysis={reviewAnalysis}
+          reviewLoading={reviewLoading}
+          reviewError={reviewError}
+          onAnalyzeReviews={handleAnalyzeCustomReviews}
+          onLoadSampleReviews={handleLoadDemoReviews}
+          analysisSource={analysisSource}
+          isDemoMode={isDemoMode}
+          comparison={comparison}
           comparisonLoading={comparisonLoading}
           comparisonError={comparisonError}
-          onComparePrices={handleManualRefresh}
+          onComparePrices={(customQuery?: string) => extractedProduct && handleComparePrices(extractedProduct, customQuery)}
         />
       </main>
     </div>
-  );
-}
-
-function IconBtn({
-  children,
-  onClick,
-  label,
-  active,
-}: {
-  children: React.ReactNode;
-  onClick: () => void;
-  label: string;
-  active?: boolean;
-}) {
-  return (
-    <button
-      onClick={onClick}
-      aria-label={label}
-      className={`flex h-7 w-7 items-center justify-center rounded-lg transition ${
-        active
-          ? "bg-foreground text-background"
-          : "text-muted-foreground hover:bg-muted hover:text-foreground"
-      }`}
-    >
-      {children}
-    </button>
   );
 }

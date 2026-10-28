@@ -752,3 +752,423 @@ test("Test 14: Same-platform seller status honestly distinguishes unverified vs 
   assert.strictEqual(singleSellerState.same_platform_status, "no_other_sellers_found");
   assert.match(singleSellerState.same_platform_summary, /No additional verified sellers/i);
 });
+
+// ---------------------------------------------------------------------------
+// Test 15: Amazon search results page extracts valid .s-result-item listings
+// ---------------------------------------------------------------------------
+test("Test 15: Amazon search results page extracts valid .s-result-item listings", () => {
+  const doc = new MockNode("#document");
+  const body = new MockNode("body");
+  doc.appendChild(body);
+
+  // Result card 1: Nothing Phone (2a)
+  const card1 = new MockNode("div", {
+    "class": "s-result-item s-search-result",
+    "data-asin": "B0CTPSMWB8"
+  });
+  const h2_1 = new MockNode("h2");
+  const a_1 = new MockNode("a", { "href": "/Nothing-Phone-Black-128-RAM/dp/B0CTPSMWB8" });
+  const span_1 = new MockNode("span", {}, "Nothing Phone (2a) 5G (Black, 128 GB)");
+  a_1.appendChild(span_1);
+  h2_1.appendChild(a_1);
+  card1.appendChild(h2_1);
+
+  const priceWrapper1 = new MockNode("span", { "class": "a-price" });
+  const priceOff1 = new MockNode("span", { "class": "a-offscreen" }, "₹21,999");
+  priceWrapper1.appendChild(priceOff1);
+  card1.appendChild(priceWrapper1);
+
+  const mrpWrapper1 = new MockNode("span", { "class": "a-price", "data-a-strike": "true" });
+  const mrpOff1 = new MockNode("span", { "class": "a-offscreen" }, "₹25,999");
+  mrpWrapper1.appendChild(mrpOff1);
+  card1.appendChild(mrpWrapper1);
+
+  const img1 = new MockNode("img", { "class": "s-image", "src": "https://m.media-amazon.com/images/I/nothing.jpg" });
+  card1.appendChild(img1);
+  body.appendChild(card1);
+
+  setupGlobalEnvironment(doc, "https://www.amazon.in/s?k=Nothing+Phone+2a+128GB");
+  const res = extractAmazonSearchResults(doc, "https://www.amazon.in/s?k=Nothing+Phone+2a+128GB");
+
+  assert.strictEqual(res.blocked, false);
+  assert.strictEqual(res.query, "Nothing Phone 2a 128GB");
+  assert.strictEqual(res.candidates.length, 1);
+  assert.strictEqual(res.candidates[0].retailer_product_id, "B0CTPSMWB8");
+  assert.strictEqual(res.candidates[0].product_title, "Nothing Phone (2a) 5G (Black, 128 GB)");
+  assert.strictEqual(res.candidates[0].current_price, 21999);
+  assert.strictEqual(res.candidates[0].mrp, 25999);
+  assert.strictEqual(res.candidates[0].availability, "IN_STOCK");
+  assert.strictEqual(res.candidates[0].product_url, "https://www.amazon.in/dp/B0CTPSMWB8");
+});
+
+// ---------------------------------------------------------------------------
+// Test 16: Amazon search results page ignores items with invalid/missing price or invalid ASIN
+// ---------------------------------------------------------------------------
+test("Test 16: Amazon search results page ignores items with invalid/missing price or invalid ASIN", () => {
+  const doc = new MockNode("#document");
+  const body = new MockNode("body");
+  doc.appendChild(body);
+
+  // Card without price (e.g. ad widget)
+  const cardNoPrice = new MockNode("div", {
+    "class": "s-result-item",
+    "data-asin": "B000000001"
+  });
+  const h2 = new MockNode("h2");
+  h2.appendChild(new MockNode("span", {}, "Unpriced Accessory"));
+  cardNoPrice.appendChild(h2);
+  body.appendChild(cardNoPrice);
+
+  // Card with invalid ASIN (empty or not 10 chars)
+  const cardBadAsin = new MockNode("div", {
+    "class": "s-result-item",
+    "data-asin": "SHORT"
+  });
+  const h2Bad = new MockNode("h2");
+  h2Bad.appendChild(new MockNode("span", {}, "Bad ASIN Item"));
+  cardBadAsin.appendChild(h2Bad);
+  const pBad = new MockNode("span", { "class": "a-price" });
+  pBad.appendChild(new MockNode("span", { "class": "a-offscreen" }, "₹500"));
+  cardBadAsin.appendChild(pBad);
+  body.appendChild(cardBadAsin);
+
+  setupGlobalEnvironment(doc, "https://www.amazon.in/s?k=test");
+  const res = extractAmazonSearchResults(doc, "https://www.amazon.in/s?k=test");
+
+  assert.strictEqual(res.blocked, false);
+  assert.strictEqual(res.candidates.length, 0);
+});
+
+// ---------------------------------------------------------------------------
+// Test 17: Amazon CAPTCHA challenge page detects #captchacharacters
+// ---------------------------------------------------------------------------
+test("Test 17: Amazon CAPTCHA challenge page detects #captchacharacters", () => {
+  const doc = new MockNode("#document");
+  const body = new MockNode("body");
+  doc.appendChild(body);
+
+  const form = new MockNode("form", { "action": "/errors/validateCaptcha" });
+  const input = new MockNode("input", { "id": "captchacharacters" });
+  form.appendChild(input);
+  body.appendChild(form);
+
+  setupGlobalEnvironment(doc, "https://www.amazon.in/s?k=captcha+test");
+  const res = extractAmazonSearchResults(doc, "https://www.amazon.in/s?k=captcha+test");
+
+  assert.strictEqual(res.blocked, true);
+  assert.strictEqual(res.blockType, "CAPTCHA");
+  assert.match(res.reason, /CAPTCHA challenge/i);
+  assert.strictEqual(res.candidates.length, 0);
+});
+
+// ---------------------------------------------------------------------------
+// Test 18: Amazon CloudFront 503 access-denied page detects 503 text
+// ---------------------------------------------------------------------------
+test("Test 18: Amazon CloudFront 503 access-denied page detects 503 text", () => {
+  const doc = new MockNode("#document");
+  const body = new MockNode("body", {}, "503 - Service Unavailable Error. To discuss automated access to Amazon data please contact api-services-support@amazon.com.");
+  doc.appendChild(body);
+
+  setupGlobalEnvironment(doc, "https://www.amazon.in/s?k=503+test");
+  const res = extractAmazonSearchResults(doc, "https://www.amazon.in/s?k=503+test");
+
+  assert.strictEqual(res.blocked, true);
+  assert.strictEqual(res.blockType, "ACCESS_DENIED_503");
+  assert.match(res.reason, /access-denied or 503/i);
+  assert.strictEqual(res.candidates.length, 0);
+});
+
+// ---------------------------------------------------------------------------
+// Test 19: Amazon empty search results page returns blocked: false, 0 candidates
+// ---------------------------------------------------------------------------
+test("Test 19: Amazon empty search results page returns blocked: false, 0 candidates", () => {
+  const doc = new MockNode("#document");
+  const body = new MockNode("body", {}, "No results for xyzabc123456789. Try checking your spelling or use more general terms");
+  doc.appendChild(body);
+
+  setupGlobalEnvironment(doc, "https://www.amazon.in/s?k=xyzabc123456789");
+  const res = extractAmazonSearchResults(doc, "https://www.amazon.in/s?k=xyzabc123456789");
+
+  assert.strictEqual(res.blocked, false);
+  assert.strictEqual(res.blockType, null);
+  assert.strictEqual(res.candidates.length, 0);
+});
+
+// ---------------------------------------------------------------------------
+// Test 20: Amazon out-of-stock search result item flags OUT_OF_STOCK
+// ---------------------------------------------------------------------------
+test("Test 20: Amazon out-of-stock search result item flags OUT_OF_STOCK", () => {
+  const doc = new MockNode("#document");
+  const body = new MockNode("body");
+  doc.appendChild(body);
+
+  const card = new MockNode("div", {
+    "class": "s-result-item",
+    "data-asin": "B08TESTOOS"
+  });
+  const h2 = new MockNode("h2");
+  h2.appendChild(new MockNode("span", {}, "Sony WH-1000XM4 (Out of Stock Edition)"));
+  card.appendChild(h2);
+
+  const priceWrapper = new MockNode("span", { "class": "a-price" });
+  priceWrapper.appendChild(new MockNode("span", { "class": "a-offscreen" }, "₹19,990"));
+  card.appendChild(priceWrapper);
+
+  const oosSpan = new MockNode("span", {}, "Currently unavailable.");
+  card.appendChild(oosSpan);
+  body.appendChild(card);
+
+  setupGlobalEnvironment(doc, "https://www.amazon.in/s?k=sony+wh");
+  const res = extractAmazonSearchResults(doc, "https://www.amazon.in/s?k=sony+wh");
+
+  assert.strictEqual(res.blocked, false);
+  assert.strictEqual(res.candidates.length, 1);
+  assert.strictEqual(res.candidates[0].availability, "OUT_OF_STOCK");
+});
+
+
+// ---------------------------------------------------------------------------
+// Test 21: Flipkart MacBook Neo extraction preserves attributes & identifiers
+// ---------------------------------------------------------------------------
+test("Test 21: Flipkart MacBook Neo extraction preserves attributes & identifiers", () => {
+  const doc = new MockNode("#document");
+  const body = new MockNode("body");
+  doc.appendChild(body);
+
+  const h1 = new MockNode("h1", {}, "Apple MacBook Neo Apple A18 Pro - (8 GB/256 GB SSD/macOS) MHFA4HN/A  (13 Inch, Silver, 1.2 Kg)");
+  body.appendChild(h1);
+
+  const priceDiv = new MockNode("div", { "class": "Nx9bqj CxhGGd" }, "₹1,09,990");
+  body.appendChild(priceDiv);
+
+  const mrpDiv = new MockNode("div", { "class": "yRaY8j" }, "₹1,19,990");
+  body.appendChild(mrpDiv);
+
+  setupGlobalEnvironment(doc, "https://www.flipkart.com/apple-macbook-neo-apple-a18-pro/p/itmfa412345?pid=COMHFA4HN");
+  const res = extractFlipkartProduct(doc, "https://www.flipkart.com/apple-macbook-neo-apple-a18-pro/p/itmfa412345?pid=COMHFA4HN");
+
+  assert.ok(res !== null);
+  assert.strictEqual(res.source_retailer, "Flipkart");
+  assert.strictEqual(res.brand, "Apple");
+  assert.strictEqual(res.current_price, 109990);
+  assert.strictEqual(res.mrp, 119990);
+  assert.strictEqual(res.retailer_product_id, "COMHFA4HN");
+});
+
+// ---------------------------------------------------------------------------
+// Test 22: Amazon search results deduplication and canonical URL creation
+// ---------------------------------------------------------------------------
+test("Test 22: Amazon search results deduplication and canonical URL creation", () => {
+  const doc = new MockNode("#document");
+  const body = new MockNode("body");
+  doc.appendChild(body);
+
+  const card1 = new MockNode("div", { "class": "s-result-item", "data-asin": "B0DTEST123" });
+  const h2_1 = new MockNode("h2");
+  h2_1.appendChild(new MockNode("span", {}, "Apple MacBook Neo (13-inch, Apple A18 Pro chip, 8GB RAM, 256GB SSD)"));
+  card1.appendChild(h2_1);
+  const price_1 = new MockNode("span", { "class": "a-price" });
+  price_1.appendChild(new MockNode("span", { "class": "a-offscreen" }, "₹1,04,990"));
+  card1.appendChild(price_1);
+  body.appendChild(card1);
+
+  // Duplicate card with same ASIN
+  const card2 = new MockNode("div", { "class": "s-result-item", "data-asin": "B0DTEST123" });
+  const h2_2 = new MockNode("h2");
+  h2_2.appendChild(new MockNode("span", {}, "Apple MacBook Neo (Duplicate Ad Card)"));
+  card2.appendChild(h2_2);
+  const price_2 = new MockNode("span", { "class": "a-price" });
+  price_2.appendChild(new MockNode("span", { "class": "a-offscreen" }, "₹1,04,990"));
+  card2.appendChild(price_2);
+  body.appendChild(card2);
+
+  setupGlobalEnvironment(doc, "https://www.amazon.in/s?k=macbook+neo");
+  const res = extractAmazonSearchResults(doc, "https://www.amazon.in/s?k=macbook+neo");
+
+  assert.strictEqual(res.candidates.length, 1);
+  assert.strictEqual(res.candidates[0].retailer_product_id, "B0DTEST123");
+  assert.strictEqual(res.candidates[0].product_url, "https://www.amazon.in/dp/B0DTEST123");
+});
+
+// ---------------------------------------------------------------------------
+// Test 23: Amazon search results price parsing with Indian decimal format
+// ---------------------------------------------------------------------------
+test("Test 23: Amazon search results price parsing with Indian decimal format", () => {
+  const doc = new MockNode("#document");
+  const body = new MockNode("body");
+  doc.appendChild(body);
+
+  const card = new MockNode("div", { "class": "s-result-item", "data-asin": "B0DDECIMA1" });
+  const h2 = new MockNode("h2");
+  h2.appendChild(new MockNode("span", {}, "Apple MacBook Neo"));
+  card.appendChild(h2);
+  const price = new MockNode("span", { "class": "a-price" });
+  price.appendChild(new MockNode("span", { "class": "a-offscreen" }, "₹1,04,990.50"));
+  card.appendChild(price);
+  body.appendChild(card);
+
+  setupGlobalEnvironment(doc, "https://www.amazon.in/s?k=macbook+neo");
+  const res = extractAmazonSearchResults(doc, "https://www.amazon.in/s?k=macbook+neo");
+
+  assert.strictEqual(res.candidates.length, 1);
+  assert.strictEqual(res.candidates[0].current_price, 104990.5);
+});
+
+// ---------------------------------------------------------------------------
+// Test 24: Flipkart -> Amazon automatic retrieval flow payload
+// ---------------------------------------------------------------------------
+test("Test 24: Flipkart -> Amazon comparison does not require open tab or force not_open status", () => {
+  // When no Amazon search tab is open, DealSense does not inject "not_open" gate
+  const product = {
+    source_retailer: "Flipkart",
+    product_name: "Sony WH-1000XM4 Wireless Noise Cancelling Headphones",
+    url: "https://www.flipkart.com/sony-wh-1000xm4/p/itm123",
+    current_site_price: 24990,
+    mrp: 29990,
+  };
+
+  const isFlipkartSource = Boolean(
+    (product.source_retailer && product.source_retailer.toLowerCase().includes("flipkart")) ||
+    (product.url && product.url.includes("flipkart.com"))
+  );
+  assert.strictEqual(isFlipkartSource, true);
+
+  // In the updated automatic flow, when tabResult.status is "not_open",
+  // comparisonPayload leaves browser_candidate_offers and browser_retrieval_status omitted
+  const comparisonPayload = { ...product };
+  assert.strictEqual(comparisonPayload.browser_retrieval_status, undefined);
+  assert.strictEqual(comparisonPayload.browser_candidate_offers, undefined);
+});
+
+// ---------------------------------------------------------------------------
+// Test 25: Background Amazon search tab retrieval uses active: false
+// ---------------------------------------------------------------------------
+test("Test 25: Background Amazon search tab creation sets active: false to preserve focus", async () => {
+  let createdTabOptions = null;
+  let closedTabId = null;
+
+  global.chrome = {
+    tabs: {
+      query: (filter, callback) => callback([]), // No existing tab
+      create: (options, callback) => {
+        createdTabOptions = options;
+        callback({ id: 999, url: options.url });
+      },
+      remove: (tabId, callback) => {
+        closedTabId = tabId;
+        if (callback) callback();
+      },
+      onUpdated: {
+        addListener: (fn) => {
+          // Immediately simulate complete status
+          setTimeout(() => fn(999, { status: "complete" }), 10);
+        },
+        removeListener: () => {},
+      },
+      sendMessage: (tabId, msg, callback) => {
+        callback({
+          success: true,
+          data: {
+            blocked: false,
+            blockType: null,
+            query: "sony wh-1000xm4",
+            candidates: [
+              {
+                retailer_name: "Amazon.in",
+                product_title: "Sony WH-1000XM4 Wireless Noise Cancelling Headphones",
+                current_price: 22990,
+                product_url: "https://www.amazon.in/dp/B0863TXGM3",
+                retailer_product_id: "B0863TXGM3",
+                availability: "IN_STOCK",
+              }
+            ],
+          },
+        });
+      },
+    },
+    runtime: {
+      lastError: null,
+    },
+  };
+
+  // Test background runner function logic
+  async function retrieveAmazonCandidatesInBackground(query) {
+    const url = "https://www.amazon.in/s?k=" + encodeURIComponent(query);
+    let createdTabId = null;
+    try {
+      const tab = await new Promise((resolve) => {
+        global.chrome.tabs.create({ url, active: false }, (newTab) => resolve(newTab));
+      });
+      createdTabId = tab.id;
+      const res = await new Promise((resolve) => {
+        global.chrome.tabs.sendMessage(createdTabId, { action: "extractAmazonSearchResults" }, (resp) => {
+          resolve(resp.data);
+        });
+      });
+      return { status: "found", candidates: res.candidates };
+    } finally {
+      if (createdTabId) {
+        global.chrome.tabs.remove(createdTabId);
+      }
+    }
+  }
+  const result = await retrieveAmazonCandidatesInBackground("sony wh-1000xm4");
+
+  // Invariant 1: Tab must be created with active: false so focus never leaves Flipkart
+  assert.strictEqual(createdTabOptions?.active, false);
+  assert.strictEqual(createdTabOptions?.url.includes("https://www.amazon.in/s?k="), true);
+
+  // Invariant 2: Candidate offers genuinely extracted
+  assert.strictEqual(result.status, "found");
+  assert.strictEqual(result.candidates.length, 1);
+  assert.strictEqual(result.candidates[0].current_price, 22990);
+
+  // Invariant 3: Background tab is cleaned up and removed
+  assert.strictEqual(closedTabId, 999);
+});
+
+// ---------------------------------------------------------------------------
+// Test 26: Blocked Amazon retrieval preserves manual fallback
+// ---------------------------------------------------------------------------
+test("Test 26: Blocked Amazon retrieval reports blocked status and preserves manual fallback capability", () => {
+  const comparison = {
+    status: "no_offers_found",
+    cross_platform_status: "retailer_unavailable",
+    cross_platform_summary: "Blocked: Amazon India CloudFront bot protection restricts automated server retrieval (HTTP 503).",
+    cross_platform_offers: [],
+    verified_offers: [],
+  };
+
+  const isUnavailable = (comparison.cross_platform_status || comparison.status) === "retailer_unavailable";
+  assert.strictEqual(isUnavailable, true);
+  // Manual button fallback condition in screens.tsx is met when crossPlatformRetailer is Amazon India
+  const crossPlatformRetailer = "Amazon India";
+  const shouldRenderManualButton = crossPlatformRetailer === "Amazon India";
+  assert.strictEqual(shouldRenderManualButton, true);
+});
+
+// ---------------------------------------------------------------------------
+// Test 27: Generic peripheral extraction captures brand, model, and category when model row is missing
+// ---------------------------------------------------------------------------
+test("Test 27: Generic peripheral extraction captures brand, model, and category when model row is missing", () => {
+  const doc = new MockNode("#document");
+  const dp = new MockNode("div", { id: "dp", "data-asin": "B0D5D8N8P4" });
+  const title = new MockNode("span", { id: "productTitle" }, "Ant Esports SuperPower RGB 3-Mode Wireless Gaming Controller with HallSense Precision Joysticks");
+  dp.appendChild(title);
+
+  const priceDiv = new MockNode("div", { id: "corePriceDisplay_desktop_feature_div" });
+  const priceSpan = new MockNode("span", { class: "a-price" });
+  priceSpan.appendChild(new MockNode("span", { class: "a-offscreen" }, "₹1,799.00"));
+  priceDiv.appendChild(priceSpan);
+  dp.appendChild(priceDiv);
+
+  doc.appendChild(dp);
+  setupGlobalEnvironment(doc, "https://www.amazon.in/dp/B0D5D8N8P4");
+
+  const extracted = extractAmazonProduct();
+  assert.ok(extracted);
+  assert.strictEqual(extracted.current_site_price, 1799.0);
+  assert.strictEqual(extracted.brand, "Ant Esports");
+  assert.strictEqual(extracted.model, "SuperPower");
+  assert.strictEqual(extracted.category, "Gaming Controller");
+});

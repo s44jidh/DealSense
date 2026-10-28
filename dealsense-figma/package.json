@@ -8,7 +8,7 @@
     "build": "vite build",
     "preview": "vite preview",
     "format": "oxfmt",
-    "test": "node --test tests/extraction_and_lifecycle.test.js"
+    "test": "node --test tests/extraction_and_lifecycle.test.js tests/review_extraction.test.js"
   },
   "dependencies": {
     "react": "^19.0.0",

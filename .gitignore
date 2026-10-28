@@ -3,7 +3,14 @@ __pycache__/
 *.py[cod]
 *.pyo
 backend/venv/
+backend/venv-py314-backup/
 .venv/
+
+# Machine Learning Data & Models
+backend/data/raw/
+backend/data/processed/
+backend/models/*.joblib
+backend/models/*.pkl
 
 # Node
 node_modules/

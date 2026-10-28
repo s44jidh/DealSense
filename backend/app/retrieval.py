@@ -21,6 +21,36 @@ from typing import Any, Optional
 from app.matcher import MatchStatus, ProductMatcher, RejectionCategory
 from app.models import RetailerDiagnostic
 
+def _load_env_file() -> None:
+    """
+    Loads environment variables from backend/.env or .env if present.
+    Preserves any pre-existing environment variables without logging or exposing values.
+    """
+    candidates = [
+        os.path.abspath(os.path.join(os.path.dirname(__file__), "..", ".env")),
+        os.path.abspath(os.path.join(os.getcwd(), "backend", ".env")),
+        os.path.abspath(os.path.join(os.getcwd(), ".env")),
+    ]
+    for p in candidates:
+        if os.path.isfile(p):
+            try:
+                with open(p, "r", encoding="utf-8") as f:
+                    for line in f:
+                        line = line.strip()
+                        if not line or line.startswith("#") or "=" not in line:
+                            continue
+                        k, v = line.split("=", 1)
+                        k = k.strip()
+                        v = v.strip().strip("'\"")
+                        if k and k not in os.environ:
+                            os.environ[k] = v
+            except Exception:
+                pass
+            break
+
+_load_env_file()
+
+
 
 class BaseRetriever(ABC):
     name: str
@@ -271,10 +301,11 @@ class AmazonRetriever(BaseRetriever):
         "triggerInterstitialChallenge",
     ]
     _CAPTCHA_INDICATORS = [
-        "captcha",
-        "Type the characters you see",
-        "Sorry, we just need to make sure",
-        "robot",
+        "captchacharacters",
+        "/errors/validatecaptcha",
+        "type the characters you see",
+        "enter the characters you see below",
+        "sorry, we just need to make sure you're not a robot",
     ]
     _503_INDICATORS = [
         "503 - Service Unavailable Error",
@@ -297,8 +328,14 @@ class AmazonRetriever(BaseRetriever):
         # Mode B: Authorized Product Data Provider (Rainforest API)
         self.rainforest_key = os.getenv("RAINFOREST_API_KEY")
 
+        # Mode C: Bright Data Web Scraper / SERP API (Optional Free Allowance / Trial)
+        self.bright_data_key = os.getenv("BRIGHT_DATA_API_KEY")
+        self.bright_data_zone = os.getenv("BRIGHT_DATA_ZONE", "web_unlocker1")
+
         if self.paapi_key and self.paapi_secret and self.paapi_tag:
             self.data_source = "Amazon Product Advertising API (PA-API v5)"
+        elif self.bright_data_key:
+            self.data_source = "Bright Data Web Scraper (Amazon India)"
         elif self.rainforest_key:
             self.data_source = "Rainforest API (Amazon India)"
         else:
@@ -308,14 +345,51 @@ class AmazonRetriever(BaseRetriever):
         """
         Dispatches to the configured permitted Amazon India data source:
         1. Official PA-API 5.0 (if AMAZON_PAAPI_* keys configured)
-        2. Rainforest API (if RAINFOREST_API_KEY configured)
-        3. Direct Search (with honest CloudFront WAF 503/403 detection)
+        2. Bright Data Web Scraper (if BRIGHT_DATA_API_KEY configured)
+        3. Rainforest API (if RAINFOREST_API_KEY configured)
+        4. Direct Search (with honest CloudFront WAF 503/403 detection)
         """
         if self.paapi_key and self.paapi_secret and self.paapi_tag:
             return self._search_paapi(query, timeout=timeout)
+        elif self.bright_data_key:
+            return self._search_bright_data(query, timeout=timeout)
         elif self.rainforest_key:
             return self._search_rainforest(query, timeout=timeout)
         else:
+            return self._search_direct(query, timeout=timeout)
+
+    def _search_bright_data(self, query: str, timeout: float = 8.0) -> list[dict]:
+        """
+        Optional backend retrieval adapter using Bright Data's Web Unlocker / SERP API.
+        Active only when BRIGHT_DATA_API_KEY is configured in backend/.env.
+        Enables reliable retrieval of Amazon India search listings without CloudFront WAF blocks.
+        """
+        if not self.bright_data_key:
+            return self._search_direct(query, timeout=timeout)
+
+        url = "https://api.brightdata.com/request"
+        target_url = f"https://www.amazon.in/s?k={urllib.parse.quote(query)}"
+        payload_data = json.dumps({
+            "zone": self.bright_data_zone,
+            "url": target_url,
+            "format": "raw"
+        }).encode("utf-8")
+
+        headers = {
+            "Authorization": f"Bearer {self.bright_data_key}",
+            "Content-Type": "application/json",
+            "User-Agent": "DealSense-Backend/2.0"
+        }
+
+        try:
+            req = urllib.request.Request(url, data=payload_data, headers=headers)
+            with urllib.request.urlopen(req, timeout=timeout) as response:
+                html = response.read().decode("utf-8", errors="replace")
+                self.last_http_status = response.getcode()
+                return self._parse_amazon_html(html)
+        except Exception as err:
+            self.last_http_status = 502
+            self.status_reason = f"Bright Data request failed: {str(err)}"
             return self._search_direct(query, timeout=timeout)
 
     def _search_paapi(self, query: str, timeout: float = 6.0) -> list[dict]:
@@ -527,28 +601,15 @@ class AmazonRetriever(BaseRetriever):
         return {
             "User-Agent": (
                 "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) "
-                "AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36"
+                "AppleWebKit/537.36 (KHTML, like Gecko) Chrome/130.0.0.0 Safari/537.36"
             ),
             "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8",
             "Accept-Language": "en-IN,en-US;q=0.9,en;q=0.8",
             "Upgrade-Insecure-Requests": "1",
-            "Sec-Fetch-Dest": "document",
-            "Sec-Fetch-Mode": "navigate",
-            "Sec-Fetch-Site": "same-origin",
-            "Referer": referer,
         }
 
     def _ensure_session(self, timeout: float = 6.0) -> None:
-        if self._warmed:
-            return
-        try:
-            headers = self._get_headers(referer="https://www.google.com/")
-            req = urllib.request.Request("https://www.amazon.in/", headers=headers)
-            with self._opener.open(req, timeout=timeout) as resp:
-                pass
-            self._warmed = True
-        except Exception:
-            pass
+        pass
 
     def _is_bot_blocked(self, html: str) -> str:
         if not html:
@@ -659,7 +720,7 @@ class AmazonRetriever(BaseRetriever):
 
     def _parse_amazon_html(self, html: str) -> list[dict]:
         cards = re.findall(
-            r'(<div[^>]+data-asin="([A-Z0-9]{10})"[^>]*class="[^"]*s-result-item[^"]*"[^>]*>.*?)(?=<div[^>]+data-asin=|\Z)',
+            r'<div[^>]+(?:data-asin="([A-Z0-9]{10})"[^>]*class="[^"]*s-result-item[^"]*"|class="[^"]*s-result-item[^"]*"[^>]*data-asin="([A-Z0-9]{10})")[^>]*>(.*?)(?=<div[^>]+data-asin=|\Z)',
             html,
             re.DOTALL,
         )
@@ -667,28 +728,44 @@ class AmazonRetriever(BaseRetriever):
         offers: list[dict] = []
         seen_asins: set[str] = set()
 
-        for block, asin in cards:
+        for m in cards:
+            asin = m[0] or m[1]
+            block = m[2]
             if not asin or asin == "0000000000" or asin in seen_asins:
                 continue
             seen_asins.add(asin)
 
-            tm = re.search(
-                r'<h2[^>]+class="[^"]*a-text-normal[^"]*"[^>]*>.*?<span[^>]*>(.*?)</span>.*?</h2>',
-                block,
-                re.DOTALL,
-            )
-            if not tm:
-                tm = re.search(
-                    r'<h2[^>]*>.*?<a[^>]*>.*?<span[^>]*>(.*?)</span>.*?</a>.*?</h2>',
-                    block,
-                    re.DOTALL,
-                )
-            if not tm:
-                continue
+            # 1. Brand header (if Amazon renders brand separately in h2.a-size-mini or h2.s-line-clamp-1)
+            brand_prefix = ""
+            bh_m = re.search(r'<h2[^>]*class="[^"]*(?:s-line-clamp-1|a-size-mini)[^"]*"[^>]*>(.*?)</h2>', block, re.DOTALL)
+            if bh_m:
+                cand_b = re.sub(r"<[^>]+>", "", bh_m.group(1)).strip()
+                if len(cand_b) < 30 and "sponsored" not in cand_b.lower() and "let us know" not in cand_b.lower():
+                    brand_prefix = cand_b
 
-            title = re.sub(r"<[^>]+>", "", tm.group(1)).strip()
+            # 2. Main product title link
+            title = ""
+            # Priority A: Anchor with a-text-normal (standard Amazon product title anchor)
+            tm = re.search(r'<a[^>]+class="[^"]*a-text-normal[^"]*"[^>]*>(.*?)</a>', block, re.DOTALL)
+            if tm:
+                title = re.sub(r"<[^>]+>", "", tm.group(1)).strip()
+            # Priority B: Anchor inside h2/h3
+            if not title:
+                tm = re.search(r'<h[23][^>]*>.*?<a[^>]*>(.*?)</a>.*?</h[23]>', block, re.DOTALL)
+                if tm:
+                    title = re.sub(r"<[^>]+>", "", tm.group(1)).strip()
+            # Priority C: Heading text
+            if not title:
+                tm = re.search(r'<h[23][^>]*>(.*?)</h[23]>', block, re.DOTALL)
+                if tm:
+                    title = re.sub(r"<[^>]+>", "", tm.group(1)).strip()
+
             if not title or len(title) < 3:
                 continue
+
+            # Prefix brand name if present in card header and missing from title text
+            if brand_prefix and brand_prefix.lower() not in title.lower():
+                title = f"{brand_prefix} {title}"
 
             prices = re.findall(
                 r'<span class="a-price"[^>]*>.*?<span class="a-offscreen">₹\s*([0-9,]+(?:\.[0-9]+)?)</span>',
@@ -762,6 +839,247 @@ class AmazonRetriever(BaseRetriever):
         return offers
 
 
+
+
+class SerpApiGoogleShoppingRetriever(BaseRetriever):
+    name = "SerpApi Google Shopping"
+    domain = "google.co.in"
+    data_source = "SerpApi Google Shopping (India)"
+
+    def __init__(self):
+        super().__init__()
+        _load_env_file()
+        self.api_key = os.getenv("SERPAPI_API_KEY")
+        self.is_enabled = bool(self.api_key and self.api_key.strip())
+        if self.is_enabled:
+            self.status_reason = "Active: Live SerpApi Google Shopping retrieval for Indian retailers."
+        else:
+            self.status_reason = "Disabled: SERPAPI_API_KEY environment variable is not configured."
+
+    @classmethod
+    def unwrap_google_url(cls, raw_link: str) -> str:
+        """
+        Unwraps Google redirect URLs (e.g. google.co.in/url?url=...)
+        to recover the direct retailer product URL.
+        """
+        if not raw_link:
+            return ""
+        if "google." in raw_link and ("/url?" in raw_link or "/url/" in raw_link):
+            try:
+                parsed = urllib.parse.urlparse(raw_link)
+                qs = urllib.parse.parse_qs(parsed.query)
+                if "url" in qs and qs["url"]:
+                    return qs["url"][0]
+                if "q" in qs and qs["q"]:
+                    return qs["q"][0]
+            except Exception:
+                pass
+        return raw_link
+
+    @classmethod
+    def identify_retailer_and_seller(cls, source_text: Optional[str], unwrapped_url: str) -> tuple[Optional[str], Optional[str]]:
+        """
+        Deterministically identifies whether a Google Shopping result belongs to
+        Amazon.in or Flipkart. Rejects all other third-party retailers.
+        Extracts verified seller name if distinguishable.
+        Returns: (retailer_name, seller_name)
+        """
+        src = (source_text or "").strip()
+        src_lower = src.lower()
+        url_lower = (unwrapped_url or "").lower()
+
+        retailer: Optional[str] = None
+        seller: Optional[str] = None
+
+        # Check Amazon India
+        if "amazon.in" in url_lower or re.search(r"\bamazon(?:\.in)?\b", src_lower):
+            retailer = "Amazon.in"
+            if " - " in src:
+                seller_part = src.split(" - ", 1)[1].strip()
+                if seller_part and seller_part.lower() not in ("amazon", "amazon.in"):
+                    seller = seller_part
+            return retailer, seller
+
+        # Check Flipkart
+        if "flipkart.com" in url_lower or re.search(r"\bflipkart\b", src_lower):
+            retailer = "Flipkart"
+            if " - " in src:
+                seller_part = src.split(" - ", 1)[1].strip()
+                if seller_part and seller_part.lower() not in ("flipkart", "flipkart.com"):
+                    seller = seller_part
+            return retailer, seller
+
+        # Third-party / brand stores (Croma, Tata CLiQ, brand direct, etc.)
+        return None, None
+
+    def search(self, query: str, timeout: float = 6.0) -> list[dict]:
+        """
+        Retrieves live Indian shopping results from SerpApi Google Shopping engine.
+        Filters and normalizes offers for supported Indian platforms (Amazon.in, Flipkart).
+        """
+        _load_env_file()
+        key = os.getenv("SERPAPI_API_KEY") or self.api_key
+        if not key or not key.strip():
+            self.is_enabled = False
+            self.last_http_status = None
+            self.status_reason = "Disabled: SERPAPI_API_KEY is not set."
+            return []
+
+        self.is_enabled = True
+        params = {
+            "engine": "google_shopping",
+            "q": query,
+            "google_domain": "google.co.in",
+            "gl": "in",
+            "hl": "en",
+            "api_key": key.strip(),
+        }
+        encoded = urllib.parse.urlencode(params)
+        url = f"https://serpapi.com/search.json?{encoded}"
+
+        req = urllib.request.Request(
+            url,
+            headers={
+                "User-Agent": "DealSense/1.0",
+                "Accept": "application/json",
+            },
+        )
+
+        try:
+            with urllib.request.urlopen(req, timeout=timeout) as resp:
+                self.last_http_status = resp.status
+                body = resp.read().decode("utf-8", errors="ignore")
+                data = json.loads(body)
+                return self.parse_shopping_results(data)
+        except urllib.error.HTTPError as he:
+            self.last_http_status = he.code
+            if he.code == 401:
+                self.status_reason = "SerpApi error (HTTP 401): Unauthorized. Check that SERPAPI_API_KEY is valid."
+            elif he.code == 429:
+                self.status_reason = "SerpApi error (HTTP 429): Plan search rate limit exceeded."
+            else:
+                self.status_reason = f"SerpApi returned HTTP {he.code}."
+            return []
+        except urllib.error.URLError as ue:
+            self.last_http_status = None
+            reason_name = type(ue.reason).__name__ if hasattr(ue, "reason") and ue.reason else "Connection failed"
+            self.status_reason = f"SerpApi network connection error: {reason_name}."
+            return []
+        except Exception as e:
+            self.last_http_status = None
+            self.status_reason = f"SerpApi request failed: {type(e).__name__}."
+            return []
+
+    def parse_shopping_results(self, data: dict) -> list[dict]:
+        """
+        Normalizes SerpApi shopping_results into standard DealSense offer dictionaries.
+        """
+        items = data.get("shopping_results") or []
+        self.last_raw_count = len(items)
+        offers: list[dict] = []
+
+        for item in items:
+            title = (item.get("title") or "").strip()
+            if not title:
+                continue
+
+            raw_link = item.get("link") or item.get("product_link") or ""
+            direct_url = self.unwrap_google_url(raw_link)
+
+            source_field = item.get("source")
+            if not source_field and isinstance(item.get("merchant"), dict):
+                source_field = item.get("merchant", {}).get("name")
+            if not source_field and isinstance(item.get("merchant"), str):
+                source_field = item.get("merchant")
+
+            retailer, seller = self.identify_retailer_and_seller(source_field, direct_url)
+
+            # Skip items not from active platforms (e.g. Croma, Reliance, brand websites)
+            if not retailer:
+                continue
+
+            # Price extraction
+            price = -1.0
+            if item.get("extracted_price") is not None:
+                try:
+                    price = float(item["extracted_price"])
+                except Exception:
+                    price = -1.0
+
+            if price <= 0 and item.get("price"):
+                p_clean = re.sub(r"[^\d.]", "", item["price"].replace(",", ""))
+                try:
+                    price = float(p_clean)
+                except Exception:
+                    price = -1.0
+
+            if price <= 0:
+                continue
+
+            # MRP extraction
+            mrp = None
+            if item.get("extracted_old_price") is not None:
+                try:
+                    mrp_val = float(item["extracted_old_price"])
+                    if mrp_val > price:
+                        mrp = mrp_val
+                except Exception:
+                    mrp = None
+            elif item.get("old_price"):
+                m_clean = re.sub(r"[^\d.]", "", item["old_price"].replace(",", ""))
+                try:
+                    mrp_val = float(m_clean)
+                    if mrp_val > price:
+                        mrp = mrp_val
+                except Exception:
+                    mrp = None
+
+            # Identifier extraction (ASIN or PID)
+            product_id = None
+            if retailer == "Amazon.in":
+                asin_m = re.search(r"/(?:dp|gp/product)/([A-Z0-9]{10})", direct_url)
+                if asin_m:
+                    product_id = asin_m.group(1)
+                    direct_url = f"https://www.amazon.in/dp/{product_id}"
+            elif retailer == "Flipkart":
+                pid_m = re.search(r"pid=([A-Z0-9]+)", direct_url)
+                if pid_m:
+                    product_id = pid_m.group(1)
+                clean_path_m = re.search(r"(https?://(?:www\.)?flipkart\.com/[^?]+)", direct_url)
+                if clean_path_m:
+                    direct_url = clean_path_m.group(1) + (f"?pid={product_id}" if product_id else "")
+
+            condition = "New"
+            cond_field = str(item.get("second_hand_condition") or "").lower()
+            if "used" in cond_field or "refurbished" in cond_field or "pre-owned" in cond_field:
+                condition = "Used" if "used" in cond_field else "Refurbished"
+
+            thumbnail = item.get("thumbnail")
+            delivery = item.get("delivery")
+
+            offers.append({
+                "retailer_name": retailer,
+                "product_title": title,
+                "product_url": direct_url or raw_link,
+                "retailer_product_id": product_id,
+                "current_price": price,
+                "mrp": mrp,
+                "currency": "INR",
+                "availability": "IN_STOCK",
+                "seller_name": seller,
+                "delivery_estimate": delivery,
+                "image_url": thumbnail,
+                "condition": condition,
+                "rejection_category": None,
+                "data_source": "SerpApi Google Shopping (India)",
+            })
+
+        self.last_parsed_count = len(offers)
+        if self.last_http_status == 200:
+            self.status_reason = f"Queried successfully via SerpApi (HTTP 200); retrieved {len(offers)} parsed listings."
+        return offers
+
+
 INACTIVE_RETAILERS = {"Croma", "Reliance Digital", "Vijay Sales"}
 
 
@@ -780,9 +1098,42 @@ class OfferRetrievalService:
                 if r.name not in INACTIVE_RETAILERS
                 and not isinstance(r, (CromaRetriever, RelianceDigitalRetriever, VijaySalesRetriever))
             ]
+        self.is_custom_retrievers = bool(retrievers is not None)
+        self.serpapi_retriever = SerpApiGoogleShoppingRetriever()
 
-    def build_search_query(self, title: str, variant: Optional[str] = None) -> str:
-        specs = ProductMatcher.extract_specs(title, variant_hint=variant)
+    def build_search_query(
+        self,
+        title: str,
+        variant: Optional[str] = None,
+        brand: Optional[str] = None,
+        model: Optional[str] = None,
+        category: Optional[str] = None,
+        specifications: Optional[dict[str, Any]] = None,
+    ) -> str:
+        specs = ProductMatcher.extract_specs(
+            title,
+            variant_hint=variant,
+            category_hint=category,
+            brand_hint=brand,
+            model_hint=model,
+            specs_hint=specifications,
+        )
+
+        if not specs.brand and brand and brand.strip().lower() not in ("unavailable", "null", "none"):
+            specs.brand = brand.strip().lower()
+
+        if not specs.model_line and model and model.strip().lower() not in ("unavailable", "null", "none"):
+            specs.model_line = model.strip().lower()
+
+        if not specs.category and (brand or model):
+            hint_specs = ProductMatcher.extract_specs(f"{brand or ''} {model or ''}")
+            if hint_specs.category:
+                specs.category = hint_specs.category
+            if not specs.model_line and hint_specs.model_line:
+                specs.model_line = hint_specs.model_line
+            if not specs.brand and hint_specs.brand:
+                specs.brand = hint_specs.brand
+
         parts: list[str] = []
         if specs.brand:
             parts.append(specs.brand.title())
@@ -793,6 +1144,144 @@ class OfferRetrievalService:
                 parts.append(specs.capacity)
             parts.append("Refrigerator")
             return " ".join(parts)
+
+        # 1b. Kitchen & Small Home Appliances
+        if specs.category in ("kitchen_home", "kitchen", "appliances"):
+            if specs.model_line or specs.generic_model:
+                cand_m = specs.model_line or specs.generic_model
+                parts.append(cand_m.upper() if (cand_m.upper() in title or any(c.isdigit() for c in cand_m)) else cand_m.title())
+            if specs.volume_capacity:
+                parts.append(specs.volume_capacity)
+            elif specs.power_wattage:
+                parts.append(specs.power_wattage)
+            for noun in ("Kettle", "Air Fryer", "Mixer Grinder", "Blender", "Toaster", "Cooker", "Oven"):
+                if noun.lower() in title.lower():
+                    if not any(noun.lower() in p.lower() for p in parts):
+                        parts.append(noun)
+                    break
+            return " ".join(parts).strip()
+
+        # 1c. Footwear
+        if specs.category in ("footwear", "shoes"):
+            if specs.model_line or specs.generic_model:
+                parts.append((specs.model_line or specs.generic_model).title())
+            for noun in ("Sneakers", "Shoes", "Clogs", "Loafers", "Sandals", "Boots"):
+                if noun.lower() in title.lower():
+                    if not any(noun.lower() in p.lower() for p in parts):
+                        parts.append(noun)
+                    break
+            return " ".join(parts).strip()
+
+        # 1d. Clothing & Apparel
+        if specs.category in ("clothing", "apparel"):
+            if specs.model_line or specs.generic_model:
+                cand_m = specs.model_line or specs.generic_model
+                parts.append(cand_m.upper() if any(c.isdigit() for c in cand_m) else cand_m.title())
+            for noun in ("Jeans", "T-Shirt", "Shirt", "Trousers", "Hoodie", "Jacket", "Polo"):
+                if noun.lower() in title.lower():
+                    if not any(noun.lower() in p.lower() for p in parts):
+                        parts.append(noun)
+                    break
+            return " ".join(parts).strip()
+
+        # 1e. Personal Care & Grooming
+        if specs.category in ("personal_care", "grooming"):
+            if specs.model_line or specs.generic_model:
+                cand_m = specs.model_line or specs.generic_model
+                parts.append(cand_m.upper() if any(c.isdigit() for c in cand_m) else cand_m.title())
+            for noun in ("Trimmer", "Shaver", "Hair Dryer", "Toothbrush"):
+                if noun.lower() in title.lower():
+                    if not any(noun.lower() in p.lower() for p in parts):
+                        parts.append(noun)
+                    break
+            return " ".join(parts).strip()
+
+        # 1f. Toys & Games
+        if specs.category in ("toys_games", "toys"):
+            if specs.model_line or specs.generic_model:
+                cand_m = specs.model_line or specs.generic_model
+                parts.append(cand_m.upper() if any(c.isdigit() for c in cand_m) else cand_m.title())
+            for noun in ("Classic", "Blocks", "Puzzle", "Car"):
+                if noun.lower() in title.lower():
+                    if not any(noun.lower() in p.lower() for p in parts):
+                        parts.append(noun)
+                    break
+            return " ".join(parts).strip()
+
+        # 1g. Watches
+        if specs.category == "watches":
+            if specs.model_line or specs.generic_model:
+                cand_m = specs.model_line or specs.generic_model
+                parts.append(cand_m.upper() if any(c.isdigit() for c in cand_m) else cand_m.title())
+            if not any(w in " ".join(parts).lower() for w in ("watch", "chronograph")):
+                parts.append("Watch")
+            return " ".join(parts).strip()
+
+        # 1h. Bags & Luggage
+        if specs.category in ("bags_luggage", "bags", "luggage"):
+            if specs.model_line or specs.generic_model:
+                parts.append((specs.model_line or specs.generic_model).title())
+            if specs.volume_capacity:
+                parts.append(specs.volume_capacity)
+            for noun in ("Backpack", "Rucksack", "Suitcase", "Luggage", "Duffel"):
+                if noun.lower() in title.lower():
+                    if not any(noun.lower() in p.lower() for p in parts):
+                        parts.append(noun)
+                    break
+            return " ".join(parts).strip()
+
+        # 1i. Books
+        if specs.category == "books":
+            if specs.isbn:
+                return f"{specs.isbn}"
+            clean_t = re.sub(r"\s*[\(\[].*?[\)\]]", "", title)
+            clean_t = clean_t.split(":")[0].split("–")[0].split("-")[0].strip()
+            if specs.book_author:
+                return f"{clean_t} {specs.book_author}".strip()
+            elif specs.brand and specs.brand != "generic":
+                return f"{clean_t} {specs.brand.title()}".strip()
+            return clean_t
+
+        # 1j. Beauty & Personal Care
+        if specs.category == "beauty":
+            if specs.generic_model:
+                parts.append(specs.generic_model.title())
+            for prod_kw in ("Sunscreen", "Face Wash", "Serum", "Shampoo", "Moisturizer", "Face Cream", "Body Lotion", "Cleanser"):
+                if prod_kw.lower() in title.lower() and not any(prod_kw.lower() in p.lower() for p in parts):
+                    parts.append(prod_kw)
+                    break
+            if specs.volume_capacity:
+                parts.append(specs.volume_capacity)
+            return " ".join(parts).strip()
+
+        # 1k. Household Products
+        if specs.category == "household":
+            if specs.generic_model:
+                parts.append(specs.generic_model.title())
+            for house_kw in ("Matic Front Load", "Matic Top Load", "Matic", "Liquid Detergent", "Dishwash Gel", "Floor Cleaner", "Toilet Cleaner", "Detergent"):
+                if house_kw.lower() in title.lower() and not any(house_kw.lower() in p.lower() for p in parts):
+                    parts.append(house_kw)
+                    break
+            if specs.volume_capacity:
+                parts.append(specs.volume_capacity)
+            return " ".join(parts).strip()
+
+        # 1l. Computer Components
+        if specs.category == "computer_components":
+            if specs.component_type == "ram":
+                if specs.ram:
+                    parts.append(specs.ram)
+                if specs.generic_model:
+                    parts.append(specs.generic_model.upper())
+                parts.append("RAM")
+            elif specs.component_type == "gpu":
+                if specs.generic_model:
+                    parts.append(specs.generic_model.upper())
+                else:
+                    parts.append("Graphics Card")
+            elif specs.generic_model:
+                parts.append(specs.generic_model.upper())
+            return " ".join(parts).strip()
 
         # 2. Laptops
         if specs.category == "laptop" or (specs.product_family and specs.category not in ("monitor", "storage", "sports", "controller", "audio", "refrigerator")):
@@ -806,7 +1295,8 @@ class OfferRetrievalService:
             if specs.gpu_model:
                 parts.append(specs.gpu_model.upper())
             elif specs.cpu_family and clean_fam and specs.cpu_family not in clean_fam.lower():
-                parts.append(specs.cpu_family.title())
+                if clean_fam.lower() not in ("macbook neo", "macbook air m1", "macbook air m2", "macbook air m3", "macbook air m5"):
+                    parts.append(specs.cpu_family.title())
 
             if specs.storage:
                 parts.append(specs.storage)
@@ -886,6 +1376,26 @@ class OfferRetrievalService:
                     break
             return " ".join(parts).strip()
 
+        # 8. Mice & Pointing Devices
+        if specs.category == "mouse":
+            if specs.model_line:
+                parts.append(specs.model_line.upper() if any(c.isdigit() for c in specs.model_line) else specs.model_line.title())
+            if specs.connectivity and specs.connectivity.lower() == "wireless":
+                parts.append("Wireless")
+            if not any(w in " ".join(parts).lower() for w in ("mouse", "mice")):
+                parts.append("Mouse")
+            return " ".join(parts).strip()
+
+        # 9. Keyboards
+        if specs.category == "keyboard":
+            if specs.model_line:
+                parts.append(specs.model_line.upper() if any(c.isdigit() for c in specs.model_line) else specs.model_line.title())
+            if "mechanical" in title.lower():
+                parts.append("Mechanical")
+            if not any(w in " ".join(parts).lower() for w in ("keyboard", "keyboards")):
+                parts.append("Keyboard")
+            return " ".join(parts).strip()
+
         # General / other categories
         if specs.model_line:
             parts.append(specs.model_line.title())
@@ -909,10 +1419,25 @@ class OfferRetrievalService:
         source_variant: Optional[str] = None,
         source_url: Optional[str] = None,
         source_retailer: Optional[str] = None,
+        brand: Optional[str] = None,
+        model: Optional[str] = None,
+        category: Optional[str] = None,
+        specifications: Optional[dict[str, Any]] = None,
+        custom_query: Optional[str] = None,
         timeout_per_retriever: float = 6.0,
     ) -> tuple[list[dict], list[str], dict[str, str], str, list[dict], list[RetailerDiagnostic]]:
         now_iso = datetime.now(timezone.utc).isoformat()
-        query = self.build_search_query(source_title, variant=source_variant)
+        if custom_query and custom_query.strip():
+            query = custom_query.strip()
+        else:
+            query = self.build_search_query(
+                source_title,
+                variant=source_variant,
+                brand=brand,
+                model=model,
+                category=category,
+                specifications=specifications,
+            )
 
         is_flipkart_source = bool(
             (source_retailer and "flipkart" in source_retailer.lower()) or
@@ -964,23 +1489,55 @@ class OfferRetrievalService:
                 ))
                 continue
 
-            try:
-                candidates = retriever.search(query, timeout=timeout_per_retriever)
-                http_st = getattr(retriever, "last_http_status", 200)
-                raw_cnt = getattr(retriever, "last_raw_count", len(candidates))
-                parsed_cnt = len(candidates)
-                if http_st is not None and http_st != 200:
-                    statuses[retriever.name] = f"Query failed (HTTP {http_st}): Retailer returned non-200 response."
-                elif not candidates:
-                    statuses[retriever.name] = f"Queried successfully (HTTP 200); 0 listings returned."
-                else:
-                    statuses[retriever.name] = f"Queried successfully (HTTP 200); retrieved {len(candidates)} listings."
-            except Exception as err:
-                statuses[retriever.name] = f"Query failed: {type(err).__name__}"
-                candidates = []
-                http_st = getattr(retriever, "last_http_status", None)
-                raw_cnt = 0
-                parsed_cnt = 0
+            candidates = []
+            used_serpapi = False
+            serp_key = os.getenv("SERPAPI_API_KEY")
+            if not self.is_custom_retrievers and serp_key and serp_key.strip():
+                try:
+                    serp_offers = self.serpapi_retriever.search(query, timeout=timeout_per_retriever)
+                    target_serp_offers = [
+                        o for o in serp_offers if o.get("retailer_name") == retriever.name
+                    ]
+                    if target_serp_offers:
+                        candidates = list(target_serp_offers)
+                        used_serpapi = True
+                        http_st = self.serpapi_retriever.last_http_status or 200
+                        raw_cnt = getattr(self.serpapi_retriever, "last_raw_count", len(target_serp_offers))
+                        parsed_cnt = len(target_serp_offers)
+                        statuses[retriever.name] = f"Queried successfully via SerpApi Google Shopping (HTTP 200); retrieved {len(candidates)} listings for {retriever.name}."
+                except Exception:
+                    candidates = []
+
+            # Retrieve more search candidates when initial results are insufficient (< 10 listings)
+            if not candidates or len(candidates) < 10:
+                try:
+                    direct_candidates = retriever.search(query, timeout=timeout_per_retriever)
+                    seen_cand_urls = {c.get("product_url") for c in candidates if c.get("product_url")}
+                    for dc in direct_candidates:
+                        u = dc.get("product_url")
+                        if u and u not in seen_cand_urls:
+                            candidates.append(dc)
+                            seen_cand_urls.add(u)
+                    http_st = getattr(retriever, "last_http_status", 200) if not used_serpapi else (http_st or 200)
+                    raw_cnt = len(candidates)
+                    parsed_cnt = len(candidates)
+                    if not candidates:
+                        if http_st and http_st >= 400:
+                            statuses[retriever.name] = f"Query failed (HTTP {http_st})"
+                        else:
+                            statuses[retriever.name] = f"Queried successfully (HTTP {http_st}); 0 listings returned."
+                    else:
+                        if not used_serpapi:
+                            statuses[retriever.name] = f"Queried successfully (HTTP {http_st}); retrieved {len(candidates)} listings."
+                        else:
+                            statuses[retriever.name] = f"Queried successfully via SerpApi & direct search (HTTP {http_st}); retrieved {len(candidates)} listings for {retriever.name}."
+                except Exception as err:
+                    if not candidates:
+                        statuses[retriever.name] = f"Query failed: {type(err).__name__}"
+                        candidates = []
+                        http_st = getattr(retriever, "last_http_status", None)
+                        raw_cnt = 0
+                        parsed_cnt = 0
 
             # Diagnostics counters for this retailer
             valid_price_cnt = 0
@@ -1016,6 +1573,10 @@ class OfferRetrievalService:
                         cand_title,
                         source_variant=source_variant,
                         candidate_url=cand_url,
+                        source_category=category,
+                        source_brand=brand,
+                        source_model=model,
+                        source_specs=specifications,
                     )
 
                 # Update diagnostic counters
@@ -1088,6 +1649,190 @@ class OfferRetrievalService:
 
         return all_evaluated_offers, queried_retailers, statuses, query, candidate_evaluations, retailer_diagnostics
 
+    def match_candidate_offers(
+        self,
+        candidates: list[dict],
+        source_title: str,
+        source_variant: Optional[str] = None,
+        retailer_name: str = "Amazon.in",
+        data_source: str = "Amazon Browser Tab Search",
+        status_reason: Optional[str] = None,
+        retrieval_status: Optional[str] = None,
+        http_status: Optional[int] = 200,
+    ) -> tuple[list[dict], list[str], dict[str, str], str, list[dict], list[RetailerDiagnostic]]:
+        """
+        Evaluates candidate offers extracted from a live user-opened browser tab
+        using the deterministic, fail-closed ProductMatcher.
+        """
+        now_iso = datetime.now(timezone.utc).isoformat()
+        query = self.build_search_query(source_title, variant=source_variant)
+        queried_retailers = [retailer_name]
+        statuses: dict[str, str] = {}
+        all_evaluated_offers: list[dict] = []
+        candidate_evaluations: list[dict] = []
+        seen_urls: set[str] = set()
+
+        # Handle explicit blocked status
+        if retrieval_status == "blocked" or (http_status and http_status in (403, 503)):
+            eff_status = http_status or 403
+            eff_reason = status_reason or "Blocked: Amazon India displayed a CAPTCHA challenge or access restriction in the browser tab."
+            statuses[retailer_name] = eff_reason
+            diag = RetailerDiagnostic(
+                retailer_name=retailer_name,
+                search_query=query,
+                http_status=eff_status,
+                status_reason=eff_reason,
+                data_source=data_source,
+                raw_listings_count=0,
+                parsed_listings_count=0,
+                valid_price_count=0,
+                price_failed_count=0,
+                model_mismatch_count=0,
+                config_mismatch_count=0,
+                unverified_variant_count=0,
+                condition_mismatch_count=0,
+                exact_matches_count=0,
+                rejection_breakdown={},
+            )
+            return [], queried_retailers, statuses, query, [], [diag]
+
+        # Handle tab not open status
+        if retrieval_status == "not_open":
+            eff_reason = status_reason or "Amazon tab not open in browser. Open an Amazon search tab to compare live prices."
+            statuses[retailer_name] = f"Unlinked: {eff_reason}"
+            diag = RetailerDiagnostic(
+                retailer_name=retailer_name,
+                search_query=query,
+                http_status=200,
+                status_reason=eff_reason,
+                data_source=data_source,
+                raw_listings_count=0,
+                parsed_listings_count=0,
+                valid_price_count=0,
+                price_failed_count=0,
+                model_mismatch_count=0,
+                config_mismatch_count=0,
+                unverified_variant_count=0,
+                condition_mismatch_count=0,
+                exact_matches_count=0,
+                rejection_breakdown={},
+            )
+            return [], queried_retailers, statuses, query, [], [diag]
+
+        raw_cnt = len(candidates)
+        parsed_cnt = len(candidates)
+        valid_price_cnt = 0
+        price_failed_cnt = 0
+        model_mismatch_cnt = 0
+        config_mismatch_cnt = 0
+        unverified_cnt = 0
+        condition_cnt = 0
+        exact_matches_cnt = 0
+        rej_breakdown: dict[str, int] = {}
+
+        for raw_offer in candidates:
+            cand_title = raw_offer.get("product_title", "")
+            cand_url = raw_offer.get("product_url", "")
+            if not cand_title or not cand_url:
+                continue
+
+            if cand_url in seen_urls:
+                continue
+            seen_urls.add(cand_url)
+
+            price = raw_offer.get("current_price", -1.0)
+            if price <= 0:
+                status = MatchStatus.MISMATCH
+                reason = "Price could not be verified from listing HTML."
+                rejection_category = RejectionCategory.PRICE_EXTRACTION_FAILED
+                cand_vars = {}
+                price_failed_cnt += 1
+            else:
+                valid_price_cnt += 1
+                status, reason, rejection_category, cand_vars = ProductMatcher.evaluate_match(
+                    source_title,
+                    cand_title,
+                    source_variant=source_variant,
+                    candidate_url=cand_url,
+                )
+
+            if status == MatchStatus.EXACT_MATCH:
+                exact_matches_cnt += 1
+            else:
+                cat_val = rejection_category.value
+                rej_breakdown[cat_val] = rej_breakdown.get(cat_val, 0) + 1
+                if rejection_category == RejectionCategory.MODEL_MISMATCH:
+                    model_mismatch_cnt += 1
+                elif rejection_category == RejectionCategory.CONFIG_MISMATCH:
+                    config_mismatch_cnt += 1
+                elif rejection_category in (RejectionCategory.UNVERIFIED_VARIANT, RejectionCategory.POSSIBLE_MATCH):
+                    unverified_cnt += 1
+                elif rejection_category == RejectionCategory.ACCESSORY_OR_CONDITION:
+                    condition_cnt += 1
+
+            candidate_evaluations.append({
+                "candidate_title": cand_title,
+                "price": price,
+                "product_url": cand_url,
+                "extracted_variants": cand_vars,
+                "extraction_status": "SUCCESS" if price > 0 else "PRICE_EXTRACTION_FAILED",
+                "status": status.value,
+                "rejection_category": rejection_category.value,
+                "reason": reason,
+            })
+
+            all_evaluated_offers.append({
+                "retailer_name": raw_offer.get("retailer_name", retailer_name),
+                "product_title": cand_title,
+                "product_url": cand_url,
+                "retailer_product_id": raw_offer.get("retailer_product_id"),
+                "current_price": price,
+                "mrp": raw_offer.get("mrp"),
+                "currency": raw_offer.get("currency", "INR"),
+                "match_status": status.value,
+                "match_details": reason,
+                "rejection_category": rejection_category.value,
+                "retrieval_timestamp": now_iso,
+                "availability": raw_offer.get("availability", "IN_STOCK"),
+                "shipping_cost": None,
+                "seller_name": raw_offer.get("seller_name"),
+                "delivery_estimate": raw_offer.get("delivery_estimate"),
+                "condition": raw_offer.get("condition", "New"),
+                "image_url": raw_offer.get("image_url"),
+                "model_identifier": cand_vars.get("mpn"),
+                "configuration": cand_vars.get("storage") or cand_vars.get("capacity"),
+                "extracted_variants": cand_vars,
+                "data_source": raw_offer.get("data_source", data_source),
+            })
+
+        if not candidates:
+            eff_reason = status_reason or f"Queried successfully (HTTP 200); 0 listings returned on {retailer_name}."
+            statuses[retailer_name] = eff_reason
+        else:
+            statuses[retailer_name] = f"Retrieved {len(all_evaluated_offers)} listings via {data_source}."
+
+        retailer_diagnostics = [
+            RetailerDiagnostic(
+                retailer_name=retailer_name,
+                search_query=query,
+                http_status=http_status or 200,
+                status_reason=statuses[retailer_name],
+                data_source=data_source,
+                raw_listings_count=raw_cnt,
+                parsed_listings_count=parsed_cnt,
+                valid_price_count=valid_price_cnt,
+                price_failed_count=price_failed_cnt,
+                model_mismatch_count=model_mismatch_cnt,
+                config_mismatch_count=config_mismatch_cnt,
+                unverified_variant_count=unverified_cnt,
+                condition_mismatch_count=condition_cnt,
+                exact_matches_count=exact_matches_cnt,
+                rejection_breakdown=rej_breakdown,
+            )
+        ]
+
+        return all_evaluated_offers, queried_retailers, statuses, query, candidate_evaluations, retailer_diagnostics
+
     def retrieve_same_platform_sellers(
         self,
         source_title: str,
@@ -1130,29 +1875,44 @@ class OfferRetrievalService:
 
         query = self.build_search_query(source_title, variant=source_variant)
 
-        try:
-            candidates = target_retriever.search(query, timeout=timeout)
-            http_st = getattr(target_retriever, "last_http_status", 200)
-            raw_cnt = getattr(target_retriever, "last_raw_count", len(candidates))
-            parsed_cnt = len(candidates)
-        except Exception as err:
-            diag = RetailerDiagnostic(
-                retailer_name=target_name,
-                search_query=query,
-                http_status=getattr(target_retriever, "last_http_status", None),
-                status_reason=f"Same-platform query failed: {type(err).__name__}",
-                raw_listings_count=0,
-                parsed_listings_count=0,
-                valid_price_count=0,
-                price_failed_count=0,
-                model_mismatch_count=0,
-                config_mismatch_count=0,
-                unverified_variant_count=0,
-                condition_mismatch_count=0,
-                exact_matches_count=0,
-                rejection_breakdown={},
-            )
-            return [], "error", [diag], None, f"Query error on {target_name}: {str(err)}"
+        candidates = []
+        serp_key = os.getenv("SERPAPI_API_KEY")
+        if not self.is_custom_retrievers and serp_key and serp_key.strip():
+            try:
+                serp_offers = self.serpapi_retriever.search(query, timeout=timeout)
+                target_serp = [o for o in serp_offers if o.get("retailer_name") == target_name]
+                if target_serp:
+                    candidates = target_serp
+                    http_st = self.serpapi_retriever.last_http_status or 200
+                    raw_cnt = len(target_serp)
+                    parsed_cnt = len(target_serp)
+            except Exception:
+                candidates = []
+
+        if not candidates:
+            try:
+                candidates = target_retriever.search(query, timeout=timeout)
+                http_st = getattr(target_retriever, "last_http_status", 200)
+                raw_cnt = getattr(target_retriever, "last_raw_count", len(candidates))
+                parsed_cnt = len(candidates)
+            except Exception as err:
+                diag = RetailerDiagnostic(
+                    retailer_name=target_name,
+                    search_query=query,
+                    http_status=getattr(target_retriever, "last_http_status", None),
+                    status_reason=f"Same-platform query failed: {type(err).__name__}",
+                    raw_listings_count=0,
+                    parsed_listings_count=0,
+                    valid_price_count=0,
+                    price_failed_count=0,
+                    model_mismatch_count=0,
+                    config_mismatch_count=0,
+                    unverified_variant_count=0,
+                    condition_mismatch_count=0,
+                    exact_matches_count=0,
+                    rejection_breakdown={},
+                )
+                return [], "error", [diag], None, f"Query error on {target_name}: {str(err)}"
 
         valid_price_cnt = 0
         price_failed_cnt = 0

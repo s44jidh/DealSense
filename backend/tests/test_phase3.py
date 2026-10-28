@@ -16,7 +16,7 @@ from app.models import (
     ComparableOffer,
     ComparePricesRequest,
 )
-from app.retrieval import AmazonRetriever, BaseRetriever, OfferRetrievalService
+from app.retrieval import AmazonRetriever, BaseRetriever, OfferRetrievalService, SerpApiGoogleShoppingRetriever
 
 
 class MockRetriever(BaseRetriever):
@@ -1151,8 +1151,8 @@ class DealSenseStrictMatchingTests(unittest.TestCase):
         self.assertEqual(st_u, MatchStatus.MISMATCH)
         self.assertEqual(cat_u, RejectionCategory.MODEL_MISMATCH)
 
-        # Different connectivity: Surge LITE Wired
-        cand_lite = "Surge LITE Wired Gaming Controller for PC | Hall Effect Joysticks & Triggers"
+        # Different connectivity: Surge XB Wired
+        cand_lite = "Surge XB Wired Gaming Controller for PC | Hall Effect Joysticks & Triggers"
         st_l, _, cat_l, _ = ProductMatcher.evaluate_match(src, cand_lite, candidate_url="https://www.amazon.in/Kreo-dp-B0GYX4H4GW")
         self.assertEqual(st_l, MatchStatus.CONFIGURATION_MISMATCH)
         self.assertEqual(cat_l, RejectionCategory.CONFIG_MISMATCH)
@@ -1526,6 +1526,709 @@ class DealSenseStrictMatchingTests(unittest.TestCase):
             self.assertEqual(resp.verified_offers[0].retailer_name, "Amazon.in")
             self.assertEqual(resp.verified_offers[0].current_price, 1899.0)
             self.assertEqual(resp.price_difference, 100.0) # 1999 - 1899
+
+
+    # ---------------------------------------------------------------------------
+    # Tests for Browser-Based Amazon Tab Candidate Integration
+    # ---------------------------------------------------------------------------
+
+    def test_browser_candidates_exact_match_flipkart_to_amazon(self):
+        req = ComparePricesRequest(
+            source_retailer="Flipkart",
+            product_title="Nothing Phone (2a) 5G (Black, 128 GB)",
+            product_url="https://www.flipkart.com/nothing-phone-2a/p/itm12345",
+            current_price=23999.0,
+            variant="128 GB · Black",
+            browser_candidate_offers=[{
+                "retailer_name": "Amazon.in",
+                "product_title": "Nothing Phone (2a) 5G (Black, 128 GB)",
+                "product_url": "https://www.amazon.in/dp/B0D1234567",
+                "current_price": 21999.0,
+                "mrp": 25999.0,
+                "retailer_product_id": "B0D1234567",
+                "availability": "IN_STOCK",
+                "data_source": "Amazon Browser Tab Search",
+            }],
+            browser_retrieval_status="found",
+        )
+        res = compare_prices(req)
+        self.assertEqual(res.status, "success")
+        self.assertEqual(res.verdict_label, "LOWER ON AMAZON.IN")
+        self.assertEqual(len(res.verified_offers), 1)
+        self.assertEqual(res.verified_offers[0].retailer_name, "Amazon.in")
+        self.assertEqual(res.verified_offers[0].current_price, 21999.0)
+        self.assertEqual(res.price_difference, 2000.0)
+        self.assertIn("saving", res.summary.lower())
+
+    def test_browser_candidates_model_mismatch_rejected(self):
+        req = ComparePricesRequest(
+            source_retailer="Flipkart",
+            product_title="Nothing Phone (2a) 5G (Black, 128 GB)",
+            product_url="https://www.flipkart.com/nothing-phone-2a/p/itm12345",
+            current_price=23999.0,
+            variant="128 GB · Black",
+            browser_candidate_offers=[{
+                "retailer_name": "Amazon.in",
+                "product_title": "Nothing Phone (1) 5G (Black, 128 GB)",
+                "product_url": "https://www.amazon.in/dp/B0B1111111",
+                "current_price": 19999.0,
+                "retailer_product_id": "B0B1111111",
+                "availability": "IN_STOCK",
+                "data_source": "Amazon Browser Tab Search",
+            }],
+            browser_retrieval_status="found",
+        )
+        res = compare_prices(req)
+        self.assertEqual(res.status, "no_offers_found")
+        self.assertEqual(res.cross_platform_status, "all_candidates_rejected")
+        self.assertEqual(res.verdict_label, "NO EXACT MATCH")
+        self.assertEqual(len(res.verified_offers), 0)
+
+    def test_browser_candidates_config_mismatch_rejected(self):
+        req = ComparePricesRequest(
+            source_retailer="Flipkart",
+            product_title="Apple iPhone 15 (Blue, 128 GB)",
+            product_url="https://www.flipkart.com/iphone-15/p/itm123",
+            current_price=69999.0,
+            variant="128 GB · Blue",
+            browser_candidate_offers=[{
+                "retailer_name": "Amazon.in",
+                "product_title": "Apple iPhone 15 (Blue, 256 GB)",
+                "product_url": "https://www.amazon.in/dp/B0CHX12345",
+                "current_price": 64999.0,
+                "retailer_product_id": "B0CHX12345",
+                "availability": "IN_STOCK",
+                "data_source": "Amazon Browser Tab Search",
+            }],
+            browser_retrieval_status="found",
+        )
+        res = compare_prices(req)
+        self.assertEqual(res.status, "no_offers_found")
+        self.assertEqual(res.cross_platform_status, "all_candidates_rejected")
+        self.assertEqual(res.verdict_label, "NO EXACT MATCH")
+        self.assertEqual(len(res.verified_offers), 0)
+
+    def test_browser_retrieval_status_blocked_captcha(self):
+        req = ComparePricesRequest(
+            source_retailer="Flipkart",
+            product_title="Sony WH-1000XM5 Wireless Headphones",
+            product_url="https://www.flipkart.com/sony-wh/p/itm123",
+            current_price=29999.0,
+            browser_candidate_offers=[],
+            browser_retrieval_status="blocked",
+            browser_status_reason="Amazon India displayed a CAPTCHA challenge in the browser tab.",
+        )
+        res = compare_prices(req)
+        self.assertEqual(res.status, "no_offers_found")
+        self.assertEqual(res.cross_platform_status, "retailer_unavailable")
+        self.assertEqual(res.verdict_label, "AMAZON.IN UNAVAILABLE")
+        self.assertIn("captcha", res.summary.lower())
+        self.assertEqual(len(res.verified_offers), 0)
+
+    def test_browser_retrieval_status_not_open(self):
+        req = ComparePricesRequest(
+            source_retailer="Flipkart",
+            product_title="Sony WH-1000XM5 Wireless Headphones",
+            product_url="https://www.flipkart.com/sony-wh/p/itm123",
+            current_price=29999.0,
+            browser_candidate_offers=[],
+            browser_retrieval_status="not_open",
+            browser_status_reason="Amazon tab not open in browser. Open an Amazon search tab to compare live prices.",
+        )
+        res = compare_prices(req)
+        self.assertEqual(res.status, "no_offers_found")
+        self.assertEqual(res.cross_platform_status, "tab_not_open")
+        self.assertEqual(res.verdict_label, "AMAZON.IN TAB NOT OPEN")
+        self.assertEqual(len(res.verified_offers), 0)
+
+    def test_browser_retrieval_status_empty_results(self):
+        req = ComparePricesRequest(
+            source_retailer="Flipkart",
+            product_title="Extremely Obscure Product XYZ 9999",
+            product_url="https://www.flipkart.com/xyz/p/itm123",
+            current_price=999.0,
+            browser_candidate_offers=[],
+            browser_retrieval_status="no_results",
+        )
+        res = compare_prices(req)
+        self.assertEqual(res.status, "no_offers_found")
+        self.assertEqual(res.cross_platform_status, "no_search_results")
+        self.assertEqual(res.verdict_label, "NO RESULTS FOUND")
+        self.assertEqual(len(res.verified_offers), 0)
+
+
+
+# ===========================================================================
+# Phase 7: Engineering Task 1 — Comprehensive Regression Tests (15 Scenarios)
+# ===========================================================================
+
+class CrossPlatformMatchingTask1RegressionTests(unittest.TestCase):
+    """
+    Automated regression suite verifying the 15 required cross-platform matching scenarios:
+    1. Same model with different title wording.
+    2. Same model with reordered title terms.
+    3. Same model with compatible optional fields missing.
+    4. Different model within the same product family.
+    5. Incompatible storage or configuration.
+    6. Different generation.
+    7. Similar titles referring to different products (accessories/covers).
+    8. Missing critical identity attributes.
+    9. Indian currency and decimal price parsing.
+    10. Duplicate cards deduplicated.
+    11. Mixed valid and invalid candidates.
+    12. Successful empty search.
+    13. Listings retrieved but all rejected by the matcher.
+    14. CAPTCHA and HTTP 503 status.
+    15. Amazon tab missing or page still loading.
+    """
+
+    def setUp(self):
+        self.fk_macbook_title = (
+            "Apple MacBook Neo Apple A18 Pro - (8 GB/256 GB SSD/macOS) MHFA4HN/A  "
+            "(13 Inch, Silver, 1.2 Kg)"
+        )
+        self.fk_url = "https://www.flipkart.com/apple-macbook-neo/p/itm12345"
+
+    # 1. Same model with different title wording
+    def test_01_same_model_different_title_wording(self):
+        cand = "Apple MacBook Neo Laptop with A18 Pro chip: 13-inch Liquid Retina Display, 8GB Unified Memory, 256GB SSD Storage, Silver"
+        status, reason, cat, _ = ProductMatcher.evaluate_match(self.fk_macbook_title, cand)
+        self.assertEqual(status, MatchStatus.EXACT_MATCH)
+        self.assertEqual(cat, RejectionCategory.VALID_MATCH)
+
+    # 2. Same model with reordered title terms
+    def test_02_same_model_reordered_title_terms(self):
+        cand = "Apple MacBook 13-inch Neo (8GB RAM, 256GB SSD, Silver)"
+        status, reason, cat, _ = ProductMatcher.evaluate_match(self.fk_macbook_title, cand)
+        self.assertEqual(status, MatchStatus.EXACT_MATCH)
+        self.assertEqual(cat, RejectionCategory.VALID_MATCH)
+
+    # 3. Same model with compatible optional fields missing (e.g. year, screen size omitted)
+    def test_03_same_model_compatible_optional_fields_missing(self):
+        src = "Apple MacBook Neo (13-inch, 8GB RAM, 256GB SSD, Silver)"
+        cand = "Apple MacBook Neo 8GB RAM 256GB SSD - Silver"
+        status, reason, cat, _ = ProductMatcher.evaluate_match(src, cand)
+        self.assertEqual(status, MatchStatus.EXACT_MATCH)
+        self.assertEqual(cat, RejectionCategory.VALID_MATCH)
+
+    # 4. Different model within the same product family
+    def test_04_different_model_within_same_product_family(self):
+        cand_air = "Apple 2024 MacBook Air 13-inch with M3 chip (8GB Unified Memory, 256GB SSD, Silver)"
+        status, reason, cat, _ = ProductMatcher.evaluate_match(self.fk_macbook_title, cand_air)
+        self.assertEqual(status, MatchStatus.MODEL_MISMATCH)
+        self.assertEqual(cat, RejectionCategory.MODEL_MISMATCH)
+        self.assertIn("Product family mismatch", reason)
+
+    # 5. Incompatible storage or configuration
+    def test_05_incompatible_storage_or_configuration(self):
+        cand_512 = "Apple MacBook Neo (13-inch, Apple A18 Pro chip, 8GB RAM, 512GB SSD, Silver)"
+        status, reason, cat, _ = ProductMatcher.evaluate_match(self.fk_macbook_title, cand_512)
+        self.assertEqual(status, MatchStatus.CONFIGURATION_MISMATCH)
+        self.assertEqual(cat, RejectionCategory.CONFIG_MISMATCH)
+        self.assertIn("Storage capacity mismatch", reason)
+
+        cand_16gb = "Apple MacBook Neo (13-inch, Apple A18 Pro chip, 16GB RAM, 256GB SSD, Silver)"
+        status2, reason2, cat2, _ = ProductMatcher.evaluate_match(self.fk_macbook_title, cand_16gb)
+        self.assertEqual(status2, MatchStatus.CONFIGURATION_MISMATCH)
+        self.assertEqual(cat2, RejectionCategory.CONFIG_MISMATCH)
+        self.assertIn("RAM capacity mismatch", reason2)
+
+    # 6. Different generation
+    def test_06_different_generation(self):
+        src_ip15 = "Apple iPhone 15 (128 GB, Black)"
+        cand_ip16 = "Apple iPhone 16 (128 GB, Black)"
+        status, reason, cat, _ = ProductMatcher.evaluate_match(src_ip15, cand_ip16)
+        self.assertEqual(status, MatchStatus.MODEL_MISMATCH)
+        self.assertIn("mismatch", reason.lower())
+
+        src_sony = "Sony WH-1000XM4 Wireless Noise Cancelling Headphones"
+        cand_sony = "Sony WH-1000XM5 Wireless Noise Cancelling Headphones"
+        status2, reason2, cat2, _ = ProductMatcher.evaluate_match(src_sony, cand_sony)
+        self.assertEqual(status2, MatchStatus.MODEL_MISMATCH)
+
+    # 7. Similar titles referring to different products (accessories/covers)
+    def test_07_similar_titles_referring_to_different_products(self):
+        cand_case = "Hard Case Cover for Apple MacBook Neo 13-inch (Clear)"
+        status, reason, cat, _ = ProductMatcher.evaluate_match(self.fk_macbook_title, cand_case)
+        self.assertEqual(status, MatchStatus.MISMATCH)
+        self.assertEqual(cat, RejectionCategory.ACCESSORY_OR_CONDITION)
+        self.assertIn("accessory", reason.lower())
+
+    # 8. Missing critical identity attributes
+    def test_08_missing_critical_identity_attributes(self):
+        cand_vague = "Fast Ultra-Thin Laptop with High Resolution Screen"
+        status, reason, cat, _ = ProductMatcher.evaluate_match(self.fk_macbook_title, cand_vague)
+        self.assertIn(status, (MatchStatus.INSUFFICIENT_DATA, MatchStatus.MODEL_MISMATCH))
+
+    # 9. Indian currency and decimal price parsing
+    def test_09_indian_currency_and_decimal_price_parsing(self):
+        from app.matcher import normalize_title
+        req = ComparePricesRequest(
+            source_retailer="Flipkart",
+            product_title=self.fk_macbook_title,
+            current_price=109990.50,
+            url=self.fk_url,
+            browser_retrieval_status="found",
+            browser_candidate_offers=[
+                {
+                    "retailer_name": "Amazon.in",
+                    "product_title": "Apple MacBook Neo (13-inch, Apple A18 Pro chip, 8GB RAM, 256GB SSD, Silver)",
+                    "product_url": "https://www.amazon.in/dp/B0D1234567",
+                    "current_price": 104990.25,
+                    "mrp": 119990.00,
+                    "currency": "INR",
+                    "availability": "IN_STOCK",
+                    "data_source": "Amazon Browser Tab Search"
+                }
+            ]
+        )
+        res = compare_prices(req)
+        self.assertEqual(res.status, "success")
+        self.assertEqual(res.lowest_price, 104990.25)
+        self.assertEqual(res.source_product.current_site_price, 109990.50)
+
+    # 10. Duplicate cards deduplicated
+    def test_10_duplicate_cards_deduplicated(self):
+        cand_item = {
+            "retailer_name": "Amazon.in",
+            "product_title": "Apple MacBook Neo (13-inch, Apple A18 Pro chip, 8GB RAM, 256GB SSD, Silver)",
+            "product_url": "https://www.amazon.in/dp/B0D1234567",
+            "retailer_product_id": "B0D1234567",
+            "current_price": 104990.0,
+            "mrp": 119990.0,
+            "currency": "INR",
+            "availability": "IN_STOCK",
+            "data_source": "Amazon Browser Tab Search"
+        }
+        req = ComparePricesRequest(
+            source_retailer="Flipkart",
+            product_title=self.fk_macbook_title,
+            current_price=109990.0,
+            url=self.fk_url,
+            browser_retrieval_status="found",
+            browser_candidate_offers=[cand_item, cand_item, cand_item]  # 3 duplicates
+        )
+        res = compare_prices(req)
+        self.assertEqual(res.status, "success")
+        self.assertEqual(len(res.verified_offers), 1)
+
+    # 11. Mixed valid and invalid candidates
+    def test_11_mixed_valid_and_invalid_candidates(self):
+        req = ComparePricesRequest(
+            source_retailer="Flipkart",
+            product_title=self.fk_macbook_title,
+            current_price=109990.0,
+            url=self.fk_url,
+            browser_retrieval_status="found",
+            browser_candidate_offers=[
+                # Valid exact match
+                {
+                    "retailer_name": "Amazon.in",
+                    "product_title": "Apple MacBook Neo (13-inch, Apple A18 Pro chip, 8GB RAM, 256GB SSD, Silver)",
+                    "product_url": "https://www.amazon.in/dp/B0D1234567",
+                    "retailer_product_id": "B0D1234567",
+                    "current_price": 104990.0,
+                    "availability": "IN_STOCK",
+                },
+                # Price failed
+                {
+                    "retailer_name": "Amazon.in",
+                    "product_title": "Apple MacBook Neo (13-inch, Apple A18 Pro chip, 8GB RAM, 256GB SSD, Silver)",
+                    "product_url": "https://www.amazon.in/dp/B0D9999999",
+                    "current_price": -1.0,
+                    "availability": "IN_STOCK",
+                },
+                # Model mismatch (Air)
+                {
+                    "retailer_name": "Amazon.in",
+                    "product_title": "Apple MacBook Air M3 (8GB RAM, 256GB SSD)",
+                    "product_url": "https://www.amazon.in/dp/B0D8888888",
+                    "current_price": 99990.0,
+                    "availability": "IN_STOCK",
+                },
+                # Storage mismatch (512GB)
+                {
+                    "retailer_name": "Amazon.in",
+                    "product_title": "Apple MacBook Neo (13-inch, Apple A18 Pro chip, 8GB RAM, 512GB SSD, Silver)",
+                    "product_url": "https://www.amazon.in/dp/B0D7777777",
+                    "current_price": 124990.0,
+                    "availability": "IN_STOCK",
+                },
+            ]
+        )
+        res = compare_prices(req)
+        self.assertEqual(res.status, "success")
+        self.assertEqual(len(res.verified_offers), 1)
+        self.assertEqual(res.verified_offers[0].retailer_product_id, "B0D1234567")
+        sd = res.structured_diagnostics
+        self.assertEqual(sd.matching.exact_match_count, 1)
+        self.assertEqual(sd.matching.rejected_count, 3)
+
+    # 12. Successful empty search
+    def test_12_successful_empty_search(self):
+        req = ComparePricesRequest(
+            source_retailer="Flipkart",
+            product_title="Extremely Obscure Product 12345678",
+            current_price=1000.0,
+            url="https://www.flipkart.com/obscure/p/itm999",
+            browser_retrieval_status="no_results",
+            browser_candidate_offers=[],
+        )
+        res = compare_prices(req)
+        self.assertEqual(res.status, "no_offers_found")
+        self.assertEqual(res.cross_platform_status, "no_search_results")
+        self.assertEqual(len(res.verified_offers), 0)
+        sd = res.structured_diagnostics
+        self.assertEqual(sd.failure_classification.retrieval_outcome, "SEARCH_PAGE_EMPTY")
+        self.assertEqual(sd.failure_classification.overall_classification, "Retrieval succeeded, no relevant matches")
+
+    # 13. Listings retrieved but all rejected by the matcher
+    def test_13_listings_retrieved_all_rejected_by_matcher(self):
+        # 29 MacBook Air/Pro candidates returned for MacBook Neo source
+        req = ComparePricesRequest(
+            source_retailer="Flipkart",
+            product_title=self.fk_macbook_title,
+            current_price=109990.0,
+            url=self.fk_url,
+            browser_retrieval_status="found",
+            browser_candidate_offers=[
+                {
+                    "retailer_name": "Amazon.in",
+                    "product_title": f"Apple 2024 MacBook Air 13-inch Laptop with M3 chip {i}",
+                    "product_url": f"https://www.amazon.in/dp/B0D{i:07d}",
+                    "retailer_product_id": f"B0D{i:07d}",
+                    "current_price": 104990.0,
+                    "mrp": 114990.0,
+                    "currency": "INR",
+                    "availability": "IN_STOCK",
+                    "data_source": "Amazon Browser Tab Search"
+                }
+                for i in range(29)
+            ]
+        )
+        res = compare_prices(req)
+        self.assertEqual(res.status, "no_offers_found")
+        self.assertEqual(res.cross_platform_status, "all_candidates_rejected")
+        self.assertEqual(len(res.verified_offers), 0)
+        self.assertEqual(res.verdict_label, "NO EXACT MATCH")
+
+        sd = res.structured_diagnostics
+        # Critical assertion: must NEVER report matcher rejection as retrieval failure!
+        self.assertEqual(sd.failure_classification.retrieval_outcome, "RETRIEVAL_SUCCEEDED")
+        self.assertEqual(sd.failure_classification.matching_outcome, "CANDIDATES_REJECTED_BY_MATCHER")
+        self.assertEqual(sd.failure_classification.overall_classification, "Retrieval succeeded, candidates rejected by matching")
+        self.assertEqual(sd.matching.rejected_count, 29)
+        self.assertEqual(sd.matching.exact_match_count, 0)
+
+    # 14. CAPTCHA and HTTP 503 status
+    def test_14_captcha_and_http_503_status(self):
+        req = ComparePricesRequest(
+            source_retailer="Flipkart",
+            product_title=self.fk_macbook_title,
+            current_price=109990.0,
+            url=self.fk_url,
+            browser_retrieval_status="blocked",
+            browser_status_reason="Amazon India displayed a CAPTCHA challenge in the browser tab.",
+            browser_candidate_offers=[],
+        )
+        res = compare_prices(req)
+        self.assertEqual(res.status, "no_offers_found")
+        self.assertEqual(res.cross_platform_status, "retailer_unavailable")
+        self.assertIn("UNAVAILABLE", res.verdict_label)
+        sd = res.structured_diagnostics
+        self.assertEqual(sd.failure_classification.retrieval_outcome, "AMAZON_ACCESS_BLOCKED")
+        self.assertEqual(sd.failure_classification.matching_outcome, "NOT_EVALUATED")
+
+    # 15. Amazon tab missing or page still loading
+    def test_15_amazon_tab_missing_or_loading(self):
+        req = ComparePricesRequest(
+            source_retailer="Flipkart",
+            product_title=self.fk_macbook_title,
+            current_price=109990.0,
+            url=self.fk_url,
+            browser_retrieval_status="not_open",
+            browser_status_reason="Amazon tab not open in browser. Open an Amazon search tab to compare live prices.",
+            browser_candidate_offers=[],
+        )
+        res = compare_prices(req)
+        self.assertEqual(res.status, "no_offers_found")
+        self.assertEqual(res.cross_platform_status, "tab_not_open")
+        self.assertEqual(res.verdict_label, "AMAZON.IN TAB NOT OPEN")
+        sd = res.structured_diagnostics
+        self.assertEqual(sd.failure_classification.retrieval_outcome, "AMAZON_TAB_NOT_OPEN")
+        self.assertEqual(sd.failure_classification.matching_outcome, "NOT_EVALUATED")
+
+
+
+    # 16. Automatic Flipkart -> Amazon retrieval without requiring open tab or manual click
+    def test_16_flipkart_to_amazon_automatic_retrieval(self):
+        req = ComparePricesRequest(
+            source_retailer="Flipkart",
+            product_title="Sony WH-1000XM4 Wireless Noise Cancelling Headphones",
+            current_price=24990.0,
+            url="https://www.flipkart.com/sony-wh-1000xm4/p/itm123",
+            # No browser_candidate_offers or browser_retrieval_status passed
+        )
+        res = compare_prices(req)
+        # Verify Amazon was automatically queried
+        self.assertIn("Amazon.in", res.retailers_queried)
+        self.assertIsNotNone(res.cross_platform_status)
+        self.assertNotEqual(res.cross_platform_status, "tab_not_open")
+        self.assertNotEqual(res.verdict_label, "AMAZON.IN TAB NOT OPEN")
+
+    # 17. Accessory safeguards: replacement ear pads, headbands, cases rejected
+    def test_17_accessory_safeguards_rejection(self):
+        source = "Sony WH-1000XM4 Wireless Noise Cancelling Headphones"
+        accessories = [
+            "SOULWIT Replacement Ear Pads for Sony WH-1000XM4 Headphones",
+            "Replacement Headband Cushion for Sony WH-1000XM4",
+            "Hard Travel Case for Sony WH-1000XM4 Noise Canceling Headphones",
+            "Silicone Protective Cover for Sony WH-1000XM4 Ear Cups",
+        ]
+        for acc in accessories:
+            status, reason, cat, vars = ProductMatcher.evaluate_match(source, acc)
+            self.assertEqual(status, MatchStatus.MISMATCH, f"Failed to reject accessory: {acc}")
+            self.assertEqual(cat, RejectionCategory.ACCESSORY_OR_CONDITION, f"Wrong rejection category for: {acc}")
+
+    # 18. Amazon HTML Parser: Brand header + product title link assembly
+    def test_18_amazon_html_parser_brand_prefix(self):
+        sample_html = """
+        <div data-asin="B0863TXGM3" class="s-result-item s-asin">
+            <h2 class="a-size-mini s-line-clamp-1"><span class="a-size-medium a-color-base">Sony</span></h2>
+            <a class="a-link-normal s-line-clamp-2 a-text-normal" href="/Sony-WH-1000XM4-Cancelling-Headphones-Mic/dp/B0863TXGM3">
+                <span class="a-size-medium a-color-base a-text-normal">WH-1000XM4 Wireless Noise Cancelling Headphones with Mic (Black)</span>
+            </a>
+            <span class="a-price"><span class="a-offscreen">₹22,990.00</span></span>
+            <span class="a-price a-text-price"><span class="a-offscreen">₹29,990.00</span></span>
+        </div>
+        """
+        retriever = AmazonRetriever()
+        parsed = retriever._parse_amazon_html(sample_html)
+        self.assertEqual(len(parsed), 1)
+        item = parsed[0]
+        self.assertEqual(item["retailer_product_id"], "B0863TXGM3")
+        self.assertTrue(item["product_title"].startswith("Sony WH-1000XM4"))
+        self.assertEqual(item["current_price"], 22990.0)
+        self.assertEqual(item["mrp"], 29990.0)
+
+    # 19. Preserving Amazon -> Flipkart retrieval
+    def test_19_amazon_to_flipkart_retrieval(self):
+        req = ComparePricesRequest(
+            source_retailer="Amazon.in",
+            product_title="Sony WH-1000XM4 Wireless Noise Cancelling Headphones",
+            current_price=22990.0,
+            url="https://www.amazon.in/dp/B0863TXGM3",
+        )
+        res = compare_prices(req)
+        self.assertIn("Flipkart", res.retailers_queried)
+        self.assertIsNotNone(res.cross_platform_status)
+
+
+    # 20. SerpApi Google Shopping Response Parsing & Normalization
+    def test_20_serpapi_response_parsing_and_normalization(self):
+        sample_payload = {
+            "search_metadata": {
+                "status": "Success",
+                "google_shopping_url": "https://www.google.co.in/search?tbm=shop&q=cosmic+byte+blitz"
+            },
+            "shopping_results": [
+                {
+                    "position": 1,
+                    "title": "Cosmic Byte Blitz Wireless Gamepad for PC (Black)",
+                    "link": "https://www.google.co.in/url?url=https://www.amazon.in/Cosmic-Byte-Wireless-Controller-Black/dp/B09XYZ1234&rct=j&q=test",
+                    "source": "Amazon.in - Appario Retail",
+                    "price": "₹1,499.00",
+                    "extracted_price": 1499.0,
+                    "extracted_old_price": 1999.0,
+                    "thumbnail": "https://encrypted-tbn3.gstatic.com/shopping?q=tbn:sample1",
+                    "delivery": "Free delivery"
+                },
+                {
+                    "position": 2,
+                    "title": "Cosmic Byte Blitz Wireless Gamepad",
+                    "link": "https://www.flipkart.com/cosmic-byte-blitz/p/itm12345?pid=CBBLITZ123",
+                    "source": "Flipkart - RetailNet",
+                    "price": "₹1,449.00",
+                    "extracted_price": 1449.0,
+                    "thumbnail": "https://encrypted-tbn3.gstatic.com/shopping?q=tbn:sample2"
+                },
+                {
+                    "position": 3,
+                    "title": "Cosmic Byte Blitz Gamepad on Croma",
+                    "link": "https://www.croma.com/cosmic-byte-blitz/p/234",
+                    "source": "Croma",
+                    "extracted_price": 1599.0
+                },
+                {
+                    "position": 4,
+                    "title": "Cosmic Byte Blitz No Price",
+                    "link": "https://www.amazon.in/dp/B000000000",
+                    "source": "Amazon.in",
+                    "extracted_price": None,
+                    "price": None
+                }
+            ]
+        }
+
+        retriever = SerpApiGoogleShoppingRetriever()
+        offers = retriever.parse_shopping_results(sample_payload)
+
+        # Invariant 1: Only Amazon.in and Flipkart are included; Croma and price-less items are discarded
+        self.assertEqual(len(offers), 2)
+
+        # Invariant 2: Amazon.in offer is normalized with direct URL and extracted seller
+        amz_offer = [o for o in offers if o["retailer_name"] == "Amazon.in"][0]
+        self.assertEqual(amz_offer["product_title"], "Cosmic Byte Blitz Wireless Gamepad for PC (Black)")
+        self.assertEqual(amz_offer["current_price"], 1499.0)
+        self.assertEqual(amz_offer["mrp"], 1999.0)
+        self.assertEqual(amz_offer["product_url"], "https://www.amazon.in/dp/B09XYZ1234")
+        self.assertEqual(amz_offer["seller_name"], "Appario Retail")
+        self.assertEqual(amz_offer["retailer_product_id"], "B09XYZ1234")
+        self.assertEqual(amz_offer["data_source"], "SerpApi Google Shopping (India)")
+
+        # Invariant 3: Flipkart offer is normalized with PID and seller
+        fk_offer = [o for o in offers if o["retailer_name"] == "Flipkart"][0]
+        self.assertEqual(fk_offer["product_title"], "Cosmic Byte Blitz Wireless Gamepad")
+        self.assertEqual(fk_offer["current_price"], 1449.0)
+        self.assertEqual(fk_offer["seller_name"], "RetailNet")
+        self.assertEqual(fk_offer["retailer_product_id"], "CBBLITZ123")
+        self.assertEqual(fk_offer["data_source"], "SerpApi Google Shopping (India)")
+
+    # 21. SerpApi Retailer Identification & Platform Separation
+    def test_21_serpapi_retailer_identification(self):
+        # Must identify Amazon.in and Flipkart
+        r1, s1 = SerpApiGoogleShoppingRetriever.identify_retailer_and_seller("Amazon.in", "https://www.amazon.in/dp/B0863TXGM3")
+        self.assertEqual(r1, "Amazon.in")
+        self.assertIsNone(s1)
+
+        r2, s2 = SerpApiGoogleShoppingRetriever.identify_retailer_and_seller("Amazon.in - Clicktech", "https://www.amazon.in/dp/B0863TXGM3")
+        self.assertEqual(r2, "Amazon.in")
+        self.assertEqual(s2, "Clicktech")
+
+        r3, s3 = SerpApiGoogleShoppingRetriever.identify_retailer_and_seller("Flipkart", "https://www.flipkart.com/p/itm123")
+        self.assertEqual(r3, "Flipkart")
+        self.assertIsNone(s3)
+
+        r4, s4 = SerpApiGoogleShoppingRetriever.identify_retailer_and_seller("Flipkart - SuperComNet", "https://www.flipkart.com/p/itm123")
+        self.assertEqual(r4, "Flipkart")
+        self.assertEqual(s4, "SuperComNet")
+
+        # Must reject other stores per Requirement 7
+        for other_source, other_url in [
+            ("Croma", "https://www.croma.com/p/123"),
+            ("Tata CLiQ", "https://www.tatacliq.com/p/456"),
+            ("Reliance Digital", "https://www.reliancedigital.in/p/789"),
+            ("The Cosmic Byte", "https://thecosmicbyte.com/products/blitz"),
+            ("Myntra", "https://www.myntra.com/p/999"),
+        ]:
+            rx, sx = SerpApiGoogleShoppingRetriever.identify_retailer_and_seller(other_source, other_url)
+            self.assertIsNone(rx, f"Failed to reject external retailer: {other_source}")
+
+    # 22. SerpApi Missing Fields & Malformed Payload Safety
+    def test_22_serpapi_missing_fields_safety(self):
+        retriever = SerpApiGoogleShoppingRetriever()
+
+        # Empty payload
+        self.assertEqual(retriever.parse_shopping_results({}), [])
+        self.assertEqual(retriever.parse_shopping_results({"shopping_results": None}), [])
+        self.assertEqual(retriever.parse_shopping_results({"shopping_results": []}), [])
+
+        # Item with missing / null fields
+        malformed = {
+            "shopping_results": [
+                {"title": "", "price": "₹500", "source": "Amazon.in"},
+                {"title": "Valid Title But Invalid Price", "price": "Free", "extracted_price": None, "source": "Amazon.in"},
+                {"title": "Valid Title But Missing Source and URL", "price": "₹1,000"},
+            ]
+        }
+        offers = retriever.parse_shopping_results(malformed)
+        self.assertEqual(len(offers), 0)
+
+    # 23. SerpApi API Error Handling and Fallback
+    def test_23_serpapi_api_failures_and_fallback(self):
+        import urllib.error
+        retriever = SerpApiGoogleShoppingRetriever()
+
+        # Simulate 401 Unauthorized
+        with patch("urllib.request.urlopen") as mock_open:
+            mock_open.side_effect = urllib.error.HTTPError(
+                url="https://serpapi.com/search.json",
+                code=401,
+                msg="Unauthorized",
+                hdrs={},
+                fp=None,
+            )
+            with patch.dict("os.environ", {"SERPAPI_API_KEY": "invalid_key"}):
+                res = retriever.search("cosmic byte blitz")
+                self.assertEqual(res, [])
+                self.assertEqual(retriever.last_http_status, 401)
+                self.assertIn("401", retriever.status_reason)
+
+        # Simulate 429 Rate Limit
+        with patch("urllib.request.urlopen") as mock_open:
+            mock_open.side_effect = urllib.error.HTTPError(
+                url="https://serpapi.com/search.json",
+                code=429,
+                msg="Too Many Requests",
+                hdrs={},
+                fp=None,
+            )
+            with patch.dict("os.environ", {"SERPAPI_API_KEY": "valid_key"}):
+                res = retriever.search("cosmic byte blitz")
+                self.assertEqual(res, [])
+                self.assertEqual(retriever.last_http_status, 429)
+                self.assertIn("429", retriever.status_reason)
+
+        # Simulate Network Timeout -> Service cleanly falls back to direct retrieval
+        service = OfferRetrievalService()
+        with patch.object(service.serpapi_retriever, "search", side_effect=TimeoutError("Request timed out")):
+            with patch.dict("os.environ", {"SERPAPI_API_KEY": "valid_key"}):
+                # Request from Flipkart to Amazon: should fallback to Amazon direct search without crashing
+                req = ComparePricesRequest(
+                    source_retailer="Flipkart",
+                    product_title="Cosmic Byte Blitz Wireless Gamepad",
+                    current_price=1499.0,
+                    url="https://www.flipkart.com/cosmic-byte-blitz/p/itm123",
+                )
+                res = compare_prices(req)
+                self.assertIsNotNone(res)
+                self.assertIn("Amazon.in", res.retailers_queried)
+
+    # 24. Strict Product Identity: Controller Model Mismatch Safeguards
+    def test_24_strict_controller_matching_safeguards(self):
+        source = "Cosmic Byte Blitz Wireless Gamepad"
+
+        # 1. Exact match
+        same = "Cosmic Byte Blitz Wireless Gamepad for PC (Black)"
+        status, reason, cat, vars = ProductMatcher.evaluate_match(source, same)
+        self.assertEqual(status, MatchStatus.EXACT_MATCH)
+        self.assertEqual(cat, RejectionCategory.VALID_MATCH)
+
+        # 2. Conflicting controller model line (Ares != Blitz)
+        diff_model = "Cosmic Byte Ares Wireless Gamepad for PC"
+        status, reason, cat, vars = ProductMatcher.evaluate_match(source, diff_model)
+        self.assertEqual(status, MatchStatus.MISMATCH)
+        self.assertEqual(cat, RejectionCategory.MODEL_MISMATCH)
+        self.assertIn("mismatch", reason.lower())
+
+        # 3. Conflicting connectivity (Wired != Wireless)
+        diff_conn = "Cosmic Byte Blitz Wired Controller"
+        status, reason, cat, vars = ProductMatcher.evaluate_match(source, diff_conn)
+        self.assertEqual(status, MatchStatus.CONFIGURATION_MISMATCH)
+        self.assertEqual(cat, RejectionCategory.CONFIG_MISMATCH)
+
+        # 4. Controller accessory (Silicone Cover Case != Controller)
+        acc = "Cosmic Byte Controller Silicone Cover Case"
+        status, reason, cat, vars = ProductMatcher.evaluate_match(source, acc)
+        self.assertEqual(status, MatchStatus.MISMATCH)
+        self.assertEqual(cat, RejectionCategory.ACCESSORY_OR_CONDITION)
+
+        # 5. Generic brand listing without model line cannot be an exact match
+        generic = "Cosmic Byte Wireless Game Controller for PC"
+        status, reason, cat, vars = ProductMatcher.evaluate_match(source, generic)
+        self.assertNotEqual(status, MatchStatus.EXACT_MATCH)
+        self.assertEqual(cat, RejectionCategory.MODEL_MISMATCH)
+        self.assertEqual(status, MatchStatus.MISMATCH)
 
 if __name__ == "__main__":
     unittest.main()

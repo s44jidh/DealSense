@@ -46,6 +46,12 @@ class AnalyzeRequest(BaseModel):
     image: Optional[str] = None
     image_url: Optional[str] = None
 
+    # Browser-retrieved candidate offers (e.g. from user-opened competitor search tab)
+    browser_candidate_offers: Optional[list[dict[str, Any]]] = None
+    browser_retrieval_status: Optional[str] = None
+    browser_status_reason: Optional[str] = None
+
+
     @model_validator(mode="before")
     @classmethod
     def populate_aliases(cls, data: Any) -> Any:
@@ -150,6 +156,8 @@ class AnalyzeResponse(BaseModel):
     reviews_analysis: ReviewsAnalysis
     market_comparison: MarketComparison
     message: str
+    target_search_query: Optional[str] = None
+    structured_source_diagnostic: Optional[SourceProductDiagnostic] = None
 
 
 
@@ -232,6 +240,8 @@ class ComparableOffer(BaseModel):
         allowed_domains = (
             "flipkart.com",
             "amazon.in",
+            "google.co.in",
+            "google.com",
         )
         host = parsed.netloc.lower()
         if ":" in host:
@@ -290,6 +300,14 @@ class ComparePricesRequest(BaseModel):
     availability: Optional[str] = None
     image: Optional[str] = None
     image_url: Optional[str] = None
+
+    # Browser-retrieved candidate offers
+    browser_candidate_offers: Optional[list[dict[str, Any]]] = None
+    browser_retrieval_status: Optional[str] = None
+    browser_status_reason: Optional[str] = None
+
+    # Custom re-search query
+    custom_query: Optional[str] = None
 
     @model_validator(mode="before")
     @classmethod
@@ -352,6 +370,71 @@ class RetailerDiagnostic(BaseModel):
     rejection_breakdown: dict[str, int] = Field(default_factory=dict)
 
 
+
+# ---------------------------------------------------------------------------
+# Structured Diagnostics Models (Phase 2)
+# ---------------------------------------------------------------------------
+
+
+class SourceProductDiagnostic(BaseModel):
+    retailer: str
+    product_url: str
+    original_title: str
+    normalized_title: str
+    brand: Optional[str] = None
+    model: Optional[str] = None
+    product_family: Optional[str] = None
+    category: Optional[str] = None
+    relevant_attributes: dict[str, Any] = Field(default_factory=dict)
+    unextracted_fields: list[str] = Field(default_factory=list)
+
+
+class RetrievalDiagnosticSummary(BaseModel):
+    target_retailer: str
+    exact_search_query: str
+    raw_result_card_count: int = 0
+    candidates_accepted_count: int = 0
+    candidates_discarded_count: int = 0
+    discard_counts_by_reason: dict[str, int] = Field(default_factory=dict)
+    normalized_candidate_count: int = 0
+    is_live_data: bool = True
+    data_source: str = "Amazon Browser Tab Search"
+    retrieval_status: str = "success"
+
+
+class CandidateMatchingDiagnostic(BaseModel):
+    candidate_title: str
+    product_url: str
+    retailer_product_id: Optional[str] = None
+    extracted_attributes: dict[str, Any] = Field(default_factory=dict)
+    classification: str
+    rejection_reason: Optional[str] = None
+    rejection_category: Optional[str] = None
+    missing_or_contradictory_attributes: list[str] = Field(default_factory=list)
+
+
+class MatchingDiagnosticSummary(BaseModel):
+    source_attributes_normalized: dict[str, Any] = Field(default_factory=dict)
+    exact_match_count: int = 0
+    possible_match_count: int = 0
+    rejected_count: int = 0
+    candidate_diagnostics: list[CandidateMatchingDiagnostic] = Field(default_factory=list)
+
+
+class FailureClassification(BaseModel):
+    retrieval_outcome: str
+    matching_outcome: str
+    overall_classification: str
+    diagnostic_message: str
+
+
+class StructuredComparisonDiagnostics(BaseModel):
+    source_product: SourceProductDiagnostic
+    retrieval: RetrievalDiagnosticSummary
+    matching: MatchingDiagnosticSummary
+    failure_classification: FailureClassification
+
+
 class ComparePricesResponse(BaseModel):
     """
     Response returned by POST /api/compare-prices.
@@ -387,3 +470,5 @@ class ComparePricesResponse(BaseModel):
     same_platform_diagnostics: list[RetailerDiagnostic] = Field(default_factory=list)
     lowest_verified_same_platform_price: Optional[float] = None
     same_platform_summary: Optional[str] = None
+    target_search_query: Optional[str] = None
+    structured_diagnostics: Optional[StructuredComparisonDiagnostics] = None

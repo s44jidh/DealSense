@@ -71,14 +71,14 @@ export class MockNode {
     const s = selector.trim();
     if (!s) return false;
 
-    // Attribute exact: [attr="val"]
-    const attrExact = s.match(/^\[([a-zA-Z0-9_-]+)="([^"]*)"\]$/);
+    // Attribute exact: [attr="val"] or [attr='val']
+    const attrExact = s.match(/^\[([a-zA-Z0-9_-]+)=["']?([^"'\]]*)["']?\]$/);
     if (attrExact) {
       return this.getAttribute(attrExact[1]) === attrExact[2];
     }
 
     // Attribute contains: [attr*="val"]
-    const attrContains = s.match(/^\[([a-zA-Z0-9_-]+)\*="([^"]*)"\]$/);
+    const attrContains = s.match(/^\[([a-zA-Z0-9_-]+)\*=["']?([^"'\]]*)["']?\]$/);
     if (attrContains) {
       const val = this.getAttribute(attrContains[1]);
       return val !== null && val.includes(attrContains[2]);
@@ -91,11 +91,11 @@ export class MockNode {
     }
 
     // Tag with attribute: e.g. span.a-text-price[data-a-strike="true"]
-    if (s.includes("[") && s.endsWith("]")) {
+    if (s.includes("[") && s.endsWith("]") && s.indexOf("[") > 0) {
       const openIdx = s.indexOf("[");
       const baseSel = s.substring(0, openIdx);
       const attrSel = s.substring(openIdx);
-      return (baseSel ? this._matchesSingle(baseSel) : true) && this._matchesSingle(attrSel);
+      return this._matchesSingle(baseSel) && this._matchesSingle(attrSel);
     }
 
     // ID selector: #id
@@ -217,4 +217,51 @@ export class MockNode {
 export function createMockDocument() {
   const doc = new MockNode("#document");
   return doc;
+}
+
+/**
+ * Parses raw HTML string into a MockNode DOM tree.
+ * @param {string} html
+ * @returns {MockNode}
+ */
+export function parseHtmlToMockDocument(html) {
+  const root = new MockNode("#document");
+  const tagRegex = /<\/?([a-zA-Z0-9_-]+)((?:\s+[^=>\/\s]+(?:=(?:\"[^\"]*\"|'[^']*'|[^>\s]+))?)*)\s*(\/?)>/g;
+
+  let stack = [root];
+  let lastIndex = 0;
+  let match;
+
+  while ((match = tagRegex.exec(html)) !== null) {
+    const textBetween = html.substring(lastIndex, match.index).trim();
+    if (textBetween && stack.length > 0) {
+      const parent = stack[stack.length - 1];
+      if (parent._textContent) parent._textContent += " " + textBetween;
+      else parent._textContent = textBetween;
+    }
+    lastIndex = tagRegex.lastIndex;
+
+    const [fullTag, tagName, attrString, isSelfClosing] = match;
+    const isClosing = fullTag.startsWith("</");
+
+    if (isClosing) {
+      if (stack.length > 1 && stack[stack.length - 1].tagName === tagName.toUpperCase()) {
+        stack.pop();
+      }
+    } else {
+      const attrs = {};
+      const attrRegex = /([a-zA-Z0-9_-]+)(?:=(?:\"([^\"]*)\"|'([^']*)'|([^>\s]+)))?/g;
+      let aMatch;
+      while ((aMatch = attrRegex.exec(attrString)) !== null) {
+        attrs[aMatch[1]] = aMatch[2] !== undefined ? aMatch[2] : (aMatch[3] !== undefined ? aMatch[3] : (aMatch[4] || ""));
+      }
+      const node = new MockNode(tagName, attrs);
+      stack[stack.length - 1].appendChild(node);
+      const isVoid = isSelfClosing || ["INPUT", "IMG", "META", "BR", "HR"].includes(tagName.toUpperCase());
+      if (!isVoid) {
+        stack.push(node);
+      }
+    }
+  }
+  return root;
 }

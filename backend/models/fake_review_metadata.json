@@ -1,0 +1,56 @@
+{
+  "model_name": "TF-IDF + Logistic Regression (Fake Review Baseline)",
+  "task": "Binary Classification: Computer-Generated (CG) vs Original (OR)",
+  "training_timestamp": "2026-10-24T04:38:31.583419+00:00",
+  "random_state": 42,
+  "vocabulary_size": 15000,
+  "dataset_split": {
+    "total_samples": 40432,
+    "train_samples": 32345,
+    "test_samples": 8087,
+    "cg_samples": 20216,
+    "or_samples": 20216
+  },
+  "test_metrics": {
+    "accuracy": 0.9351,
+    "precision_macro": 0.9353,
+    "recall_macro": 0.9351,
+    "f1_macro": 0.9351,
+    "f1_weighted": 0.9351,
+    "per_class": {
+      "CG": {
+        "precision": 0.9456,
+        "recall": 0.9233,
+        "f1_score": 0.9343,
+        "support": 4044.0
+      },
+      "OR": {
+        "precision": 0.9251,
+        "recall": 0.9468,
+        "f1_score": 0.9358,
+        "support": 4043.0
+      }
+    },
+    "confusion_matrix": {
+      "labels": [
+        "CG",
+        "OR"
+      ],
+      "matrix": [
+        [
+          3734,
+          310
+        ],
+        [
+          215,
+          3828
+        ]
+      ]
+    }
+  },
+  "classes": [
+    "CG",
+    "OR"
+  ],
+  "disclaimer": "Trained on the Kaggle Fake Reviews Dataset. Estimates whether textual phrasing resembles computer-generated (CG) or original (OR) dataset samples. Not definitive proof of live review fraud."
+}

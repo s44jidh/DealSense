@@ -1,0 +1,78 @@
+{
+  "model_name": "TF-IDF + Logistic Regression",
+  "training_timestamp": "2026-10-18T16:11:01.457621+00:00",
+  "random_state": 42,
+  "vocabulary_size": 12000,
+  "dataset_split": {
+    "total_deduplicated_samples": 110724,
+    "train_samples": 77506,
+    "val_samples": 16609,
+    "test_samples": 16609
+  },
+  "model_comparison_val": {
+    "logistic_regression": {
+      "accuracy": 0.8624,
+      "f1_weighted": 0.88
+    },
+    "multinomial_nb": {
+      "accuracy": 0.9007,
+      "f1_weighted": 0.8865
+    }
+  },
+  "test_metrics": {
+    "accuracy": 0.8656,
+    "precision_macro": 0.6949,
+    "recall_macro": 0.7668,
+    "f1_macro": 0.7144,
+    "f1_weighted": 0.8823,
+    "per_class": {
+      "negative": {
+        "precision": 0.8326,
+        "recall": 0.8476,
+        "f1_score": 0.84,
+        "support": 3150.0
+      },
+      "neutral": {
+        "precision": 0.2771,
+        "recall": 0.559,
+        "f1_score": 0.3705,
+        "support": 966.0
+      },
+      "positive": {
+        "precision": 0.9749,
+        "recall": 0.8938,
+        "f1_score": 0.9326,
+        "support": 12493.0
+      }
+    },
+    "confusion_matrix": {
+      "labels": [
+        "negative",
+        "neutral",
+        "positive"
+      ],
+      "matrix": [
+        [
+          2670,
+          388,
+          92
+        ],
+        [
+          231,
+          540,
+          195
+        ],
+        [
+          306,
+          1021,
+          11166
+        ]
+      ]
+    }
+  },
+  "label_mapping": {
+    "0": "negative",
+    "1": "neutral",
+    "2": "positive"
+  }
+}
