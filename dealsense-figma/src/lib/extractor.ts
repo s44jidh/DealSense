@@ -41,6 +41,8 @@ export interface ExtractedProduct {
     total_reviews_found: number;
     has_more: boolean;
     limitation_note?: string | null;
+    target_count?: number;
+    rating_distribution?: Record<string, number>;
   };
   analysis_source?: "live_dom" | "demo" | "manual";
 }
@@ -134,6 +136,60 @@ export async function extractActiveTabProduct(): Promise<ExtractedProduct | null
   }
 }
 
+/**
+ * Triggers multi-page review collection in the active tab (Amazon.in or Flipkart)
+ * up to targetCount (e.g. 100 or 300) with rating diversity and polite delays.
+ */
+export async function collectTabReviews(options?: {
+  targetCount?: number;
+  maxCount?: number;
+  diversify?: boolean;
+}): Promise<{
+  reviews: ExtractedReview[];
+  total_collected: number;
+  pages_scanned: number;
+  target_count: number;
+  has_more: boolean;
+  rating_distribution?: Record<string, number>;
+  limitation_note?: string | null;
+  stopped_reason?: string;
+} | null> {
+  if (typeof chrome === "undefined" || !chrome.tabs?.query) {
+    return null;
+  }
+
+  try {
+    const tabs = await new Promise<any[]>((resolve) => {
+      chrome.tabs.query({ active: true, currentWindow: true }, (res: any[]) => resolve(res || []));
+    });
+    const activeTab = tabs[0];
+    if (!activeTab || !activeTab.id) return null;
+
+    const res = await new Promise<any>((resolve) => {
+      chrome.tabs.sendMessage(
+        activeTab.id,
+        {
+          action: "collectMultiPageReviews",
+          targetCount: options?.targetCount ?? 100,
+          maxCount: options?.maxCount ?? 300,
+          diversify: options?.diversify ?? true,
+        },
+        (resp: any) => {
+          if (chrome.runtime?.lastError || !resp || !resp.success) {
+            resolve(null);
+          } else {
+            resolve(resp);
+          }
+        }
+      );
+    });
+    return res;
+  } catch (err) {
+    console.warn("[DealSense] collectTabReviews error:", err);
+    return null;
+  }
+}
+
 export function isValidExtractedProduct(p: any): p is ExtractedProduct {
   return (
     typeof p === "object" &&
@@ -174,7 +230,7 @@ function extractAmazonAsin(doc: Document, url?: string): string | null {
       if (qAsin && /^[A-Z0-9]{10}$/i.test(qAsin.trim())) {
         return qAsin.trim().toUpperCase();
       }
-    } catch (e) {}
+    } catch (e) { }
   }
 
   const prodLink = doc.querySelector("a[data-hook='product-link'], #cm_cr_product_info a");
@@ -379,11 +435,11 @@ export function extractAmazonFromDOM(): ExtractedProduct | null {
               break;
             }
           }
-        } catch {}
+        } catch { }
       }
       if (jsonLd) break;
     }
-  } catch (e) {}
+  } catch (e) { }
 
   if (price === null && jsonLd && jsonLd.offers) {
     const offers = jsonLd.offers;
@@ -866,6 +922,155 @@ function extractAmazonSpecifications(doc: Document, jsonLd?: any): Record<string
   return Object.keys(specs).length > 0 ? specs : null;
 }
 
+function parsePriceText(text: string | null): number | null {
+  return parsePrice(text);
+}
+
+function isValidHttpUrl(u: any): boolean {
+  if (!u || typeof u !== "string") return false;
+  const trimmed = u.trim();
+  if (!trimmed.startsWith("http://") && !trimmed.startsWith("https://")) return false;
+  if (trimmed.includes("transparent-pixel") || trimmed.includes("grey-pixel") || trimmed.includes("data:image")) return false;
+  return true;
+}
+
+function extractAmazonSeller(doc: Document): string | null {
+  const sellerEl =
+    doc.querySelector("#sellerProfileTriggerId") ||
+    doc.querySelector("#merchant-info a") ||
+    doc.querySelector("#tabular-buybox .tabular-buybox-container tr:last-child td:last-child span") ||
+    doc.querySelector("#merchant-info");
+
+  if (!sellerEl) return null;
+  let text = sellerEl.textContent ? sellerEl.textContent.trim() : "";
+  text = text.replace(/^Sold by:?\s*/i, "").replace(/\s+and\s+Fulfilled by.*$/i, "").trim();
+  if (text.includes("Amazon.in") || text.includes("Appario") || text.includes("Retail")) {
+    return text.split(/\r?\n/)[0].trim();
+  }
+  return text || null;
+}
+
+function extractAmazonVariant(doc: Document): string | null {
+  const parts: string[] = [];
+  const twisterDimensionIds = [
+    "color_name",
+    "size_name",
+    "style_name",
+    "pattern_name",
+    "configuration",
+    "customer_package_type",
+  ];
+
+  for (const dim of twisterDimensionIds) {
+    const el = doc.querySelector(`#inline-twister-expanded-dimension-text-${dim}`);
+    if (el && el.textContent) {
+      const val = el.textContent.trim();
+      if (val && !parts.includes(val)) {
+        parts.push(val);
+      }
+    }
+  }
+
+  if (parts.length === 0) {
+    for (const dim of twisterDimensionIds) {
+      const el =
+        doc.querySelector(`#variation_${dim} span.selection`) ||
+        doc.querySelector(`#variation_${dim} .selection`) ||
+        doc.querySelector(`#variation_${dim} .a-dropdown-prompt`);
+      if (el && el.textContent) {
+        const val = el.textContent.trim();
+        if (val && !/^(select|choose|\-)/i.test(val) && !parts.includes(val)) {
+          parts.push(val);
+        }
+      }
+    }
+  }
+
+  return parts.length > 0 ? parts.join(" · ") : null;
+}
+
+function extractAmazonImage(doc: Document): string | null {
+  const candidateSelectors = [
+    "#landingImage",
+    "#imgBlkFront",
+    "#ebooks-img-blk-front",
+    "#main-image",
+  ];
+
+  for (const sel of candidateSelectors) {
+    const el = doc.querySelector(sel);
+    if (el) {
+      const hires = el.getAttribute("data-old-hires");
+      if (hires && isValidHttpUrl(hires)) return hires.trim();
+      const dynamic = el.getAttribute("data-a-dynamic-image");
+      if (dynamic) {
+        try {
+          const parsed = JSON.parse(dynamic);
+          const urls = Object.keys(parsed);
+          if (urls.length > 0) {
+            urls.sort((a, b) => {
+              const dimA = Array.isArray(parsed[a]) ? parsed[a][0] * parsed[a][1] : 0;
+              const dimB = Array.isArray(parsed[b]) ? parsed[b][0] * parsed[b][1] : 0;
+              return dimB - dimA;
+            });
+            if (isValidHttpUrl(urls[0])) return urls[0].trim();
+          }
+        } catch { }
+      }
+      const src = el.getAttribute("src");
+      if (src && isValidHttpUrl(src)) return src.trim();
+    }
+  }
+  return null;
+}
+
+function extractAmazonMrp(doc: Document, sellingPrice?: number | null): number | null {
+  const candidateContainers = [
+    doc.querySelector("#corePriceDisplay_desktop_feature_div"),
+    doc.querySelector("#corePrice_desktop"),
+    doc.querySelector("#corePrice_feature_div"),
+    doc.querySelector("#apex_desktop"),
+    doc.querySelector("#desktop_unifiedPrice"),
+    doc.querySelector("#price"),
+  ].filter(Boolean) as Element[];
+
+  for (const container of candidateContainers) {
+    const basisEls = container.querySelectorAll(".basisPrice, [data-csa-c-element-id*=\"basisPrice\"]");
+    for (const basisEl of Array.from(basisEls)) {
+      const text = basisEl.textContent || "";
+      if (!/save|coupon|emi|cashback/i.test(text)) {
+        const offscreen = basisEl.querySelector(".a-offscreen") || basisEl.querySelector(".a-text-price");
+        const val = parsePriceText(offscreen ? offscreen.textContent : text);
+        if (val !== null && (!sellingPrice || val >= sellingPrice)) {
+          return val;
+        }
+      }
+    }
+  }
+
+  for (const container of candidateContainers) {
+    const strikeEls = container.querySelectorAll(
+      "span.a-text-price[data-a-strike=\"true\"], span.a-price.a-text-price, span.a-text-strike"
+    );
+    for (const strikeEl of Array.from(strikeEls)) {
+      const parent = strikeEl.closest("tr, div, span.a-size-small, li");
+      const context = (parent ? parent.textContent : strikeEl.parentElement ? strikeEl.parentElement.textContent : "") || "";
+      const isMrp = /m\.?r\.?p|list\s*price|maximum\s*retail/i.test(context);
+      const isExcluded = /save|savings|coupon|emi|cashback|discount/i.test(context);
+
+      if (isMrp && !isExcluded) {
+        const offscreen = strikeEl.querySelector(".a-offscreen") || strikeEl;
+        const val = parsePriceText(offscreen.textContent);
+        if (val !== null && (!sellingPrice || val >= sellingPrice)) {
+          return val;
+        }
+      }
+    }
+  }
+
+  return null;
+}
+
 function extractAmazonReviewsFromDOM(doc: Document): ExtractedReview[] {
   const reviews: ExtractedReview[] = [];
   const rawCards = doc.querySelectorAll(
@@ -974,7 +1179,7 @@ function extractAmazonReviewsFromDOM(doc: Document): ExtractedReview[] {
         date,
         verified_purchase: verifiedPurchase,
       });
-    } catch {}
+    } catch { }
   }
   return reviews;
 }
@@ -1005,7 +1210,7 @@ export function extractFlipkartFromDOM(): ExtractedProduct | null {
           break;
         }
       }
-    } catch {}
+    } catch { }
     if (jsonLd) break;
   }
 
@@ -1049,7 +1254,7 @@ export function extractFlipkartFromDOM(): ExtractedProduct | null {
     pid = u.searchParams.get("pid") || u.searchParams.get("PID");
     const m = u.pathname.match(/\/p\/(itm[a-zA-Z0-9]+)/i);
     if (m) itemId = m[1];
-  } catch {}
+  } catch { }
   if (!pid && jsonLd && jsonLd.sku) {
     pid = String(jsonLd.sku).trim();
   }
@@ -1258,7 +1463,7 @@ export function extractAmazonSearchResultsFromDOM(): {
   try {
     const u = new URL(href);
     query = u.searchParams.get("k") || "";
-  } catch {}
+  } catch { }
   if (!query) {
     const searchInput = doc.querySelector<HTMLInputElement>("#twotabsearchtextbox");
     if (searchInput && searchInput.value) {
@@ -1633,7 +1838,7 @@ export async function retrieveAmazonCandidatesInBackground(
             // tab may have already been closed
           }
         });
-      } catch {}
+      } catch { }
     }
   }
 }

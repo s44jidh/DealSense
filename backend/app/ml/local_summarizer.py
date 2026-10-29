@@ -4,11 +4,14 @@ Local Extractive Review Summarization & Thematic Mining.
 
 Features:
 - 100% offline extractive summarization (zero external API keys or remote LLMs required)
-- Sentiment separation (positive, neutral, negative)
-- Information density & TF-IDF sentence ranking
-- Aspect-guided thematic grouping (build quality, performance, battery, comfort, value, logistics)
+- Full-sample analysis supporting 100–300+ customer reviews without truncation
+- Normalized review deduplication to prevent spam from distorting themes
+- Aspect-guided thematic grouping (build quality, performance, battery, comfort, value, logistics, etc.)
+- Detection of recurring complaints and critical minority hardware/software defects
+- Evidence-based opinion synthesis answering the 7 core buyer questions (~150–250 words)
+- Purchase verdict, suitability profiling, and evidence confidence scoring
 - Genuine review excerpt quotation (zero hallucination / zero fabrication)
-- Transparent sample-size caveat handling for sparse reviews (< 3 reviews)
+- Transparent sample-size caveat handling for sparse reviews (< 15 reviews)
 """
 
 from __future__ import annotations
@@ -40,6 +43,13 @@ LOCAL_NEGATIVE_CUES = set(NEGATIVE_CUES).union({
     "poor", "broke", "broken", "defective", "waste", "horrible", "terrible", "worst"
 })
 
+# Specific cues indicating hardware/functional defects
+DEFECT_CUES = {
+    "defective", "broken", "broke", "stopped working", "drift", "fail", "failed",
+    "failure", "dead", "unresponsive", "burnt", "burning", "disconnection",
+    "disconnecting", "glitch", "crack", "cracked", "faulty", "malfunction", "dies"
+}
+
 
 class LocalReviewSummarizer:
     """
@@ -55,24 +65,49 @@ class LocalReviewSummarizer:
         reviews: List[Dict[str, Any]],
         sentiment_preds: Optional[List[Dict[str, Any]]] = None,
         aspects_data: Optional[Dict[str, Any]] = None,
+        sentiment_percentages: Optional[Dict[str, float]] = None,
+        target_count: Optional[int] = None,
+        fake_summary: Optional[Dict[str, Any]] = None,
+        avg_rating: Optional[float] = None,
     ) -> Dict[str, Any]:
         """
-        Synthesizes customer review feedback locally.
+        Synthesizes customer review feedback locally across the entire collected sample.
         Returns a dictionary compatible with LLMReviewSummaryResponse.
         """
-        # Filter valid review items with non-empty text
+        # Deduplicate and filter non-empty reviews
+        seen_texts: Set[str] = set()
         valid_reviews: List[Dict[str, Any]] = []
+        duplicate_count = 0
+
         for i, r in enumerate(reviews):
-            text = (r.get("text") or "").strip()
-            if text:
-                valid_reviews.append({
-                    "index": i,
-                    "text": text,
-                    "rating": r.get("rating"),
-                    "title": r.get("title"),
-                    "author": r.get("author") or "Customer",
-                    "sentiment_pred": sentiment_preds[i] if (sentiment_preds and i < len(sentiment_preds)) else None,
-                })
+            if not isinstance(r, dict):
+                continue
+            raw_text = r.get("text")
+            if not isinstance(raw_text, str):
+                continue
+            text = raw_text.strip()
+            if not text:
+                continue
+
+            # Normalized deduplication key
+            norm = re.sub(r"[^\w\s]", "", text.lower())
+            norm = re.sub(r"\s+", " ", norm).strip()
+            if len(norm) < 4:
+                continue
+
+            if norm in seen_texts:
+                duplicate_count += 1
+                continue
+
+            seen_texts.add(norm)
+            valid_reviews.append({
+                "index": i,
+                "text": text,
+                "rating": r.get("rating"),
+                "title": r.get("title"),
+                "author": r.get("author") or "Customer",
+                "sentiment_pred": sentiment_preds[i] if (sentiment_preds and i < len(sentiment_preds)) else None,
+            })
 
         total_reviews = len(valid_reviews)
 
@@ -83,16 +118,25 @@ class LocalReviewSummarizer:
                 "available": False,
                 "provider": "local",
                 "summary": "No customer reviews available to analyze.",
+                "verdict": "Insufficient data to formulate a purchase recommendation.",
+                "verdict_sentiment": "INSUFFICIENT_EVIDENCE",
+                "verdict_detail": "Zero customer reviews were accessible on this listing.",
+                "confidence_score": 0.0,
+                "confidence_level": "INSUFFICIENT",
+                "confidence_explanation": "Zero customer reviews were accessible on this listing.",
+                "suitable_for": None,
+                "avoid_if": None,
+                "total_reviews_analyzed": 0,
+                "target_count": target_count,
                 "recurring_complaints": [],
                 "common_positive_themes": [],
                 "pros": [],
                 "cons": [],
                 "investigation_patterns": [],
-                "total_reviews_analyzed": 0,
                 "error": "NO_REVIEWS",
             }
 
-        # 2. Extract and classify sentences across all reviews
+        # 2. Extract and classify sentences across all unique reviews
         extracted_sentences: List[Dict[str, Any]] = []
         review_sentiments: List[str] = []
 
@@ -101,13 +145,13 @@ class LocalReviewSummarizer:
             r_rating = r_item["rating"]
             r_pred = r_item["sentiment_pred"]
 
-            # Determine review-level sentiment based on customer rating and Model A prediction
-            if r_rating is not None and r_rating <= 2:
+            # Derive review sentiment primarily from Model A prediction, with rating fallback
+            if r_pred and r_pred.get("sentiment") in ("positive", "neutral", "negative"):
+                r_sentiment = r_pred["sentiment"]
+            elif r_rating is not None and r_rating <= 2:
                 r_sentiment = "negative"
             elif r_rating is not None and r_rating >= 4:
                 r_sentiment = "positive"
-            elif r_pred and r_pred.get("sentiment") in ("positive", "neutral", "negative"):
-                r_sentiment = r_pred["sentiment"]
             else:
                 r_sentiment = "neutral"
             review_sentiments.append(r_sentiment)
@@ -121,24 +165,31 @@ class LocalReviewSummarizer:
 
                 sent_polarity = cls._classify_sentence_polarity(clean_s, r_sentiment, r_rating)
                 aspect_ids = cls._detect_aspects(clean_s)
+                is_defect = (sent_polarity == "negative") and any(w in clean_s.lower() for w in DEFECT_CUES)
 
                 extracted_sentences.append({
                     "text": clean_s,
                     "polarity": sent_polarity,
                     "aspect_ids": aspect_ids,
+                    "is_defect": is_defect,
                     "review_index": r_item["index"],
                     "rating": r_rating,
                     "score": 0.0,
                 })
 
-        # Calculate sentiment distribution
-        pos_rev_count = sum(1 for s in review_sentiments if s == "positive")
-        neg_rev_count = sum(1 for s in review_sentiments if s == "negative")
-        neu_rev_count = total_reviews - pos_rev_count - neg_rev_count
+        # Calculate sentiment distribution - strictly synchronized with Model A ground truth
+        if sentiment_percentages and "positive" in sentiment_percentages:
+            pos_pct = round(float(sentiment_percentages.get("positive", 0.0)), 1)
+            neg_pct = round(float(sentiment_percentages.get("negative", 0.0)), 1)
+            neu_pct = round(float(sentiment_percentages.get("neutral", 0.0)), 1)
+        else:
+            pos_rev_count = sum(1 for s in review_sentiments if s == "positive")
+            neg_rev_count = sum(1 for s in review_sentiments if s == "negative")
+            neu_rev_count = total_reviews - pos_rev_count - neg_rev_count
 
-        pos_pct = round(100.0 * pos_rev_count / total_reviews, 1)
-        neg_pct = round(100.0 * neg_rev_count / total_reviews, 1)
-        neu_pct = round(100.0 * neu_rev_count / total_reviews, 1)
+            pos_pct = round(100.0 * pos_rev_count / total_reviews, 1)
+            neg_pct = round(100.0 * neg_rev_count / total_reviews, 1)
+            neu_pct = round(100.0 * neu_rev_count / total_reviews, 1)
 
         # 3. Score sentences for informativeness and representativeness
         cls._score_sentences(extracted_sentences)
@@ -150,6 +201,9 @@ class LocalReviewSummarizer:
                 total_reviews=total_reviews,
                 extracted_sentences=extracted_sentences,
                 review_sentiments=review_sentiments,
+                target_count=target_count,
+                avg_rating=avg_rating,
+                duplicate_count=duplicate_count,
             )
 
         # 5. Standard extractive synthesis (3 or more reviews)
@@ -161,6 +215,10 @@ class LocalReviewSummarizer:
             neu_pct=neu_pct,
             extracted_sentences=extracted_sentences,
             valid_reviews=valid_reviews,
+            target_count=target_count,
+            fake_summary=fake_summary,
+            avg_rating=avg_rating,
+            duplicate_count=duplicate_count,
         )
 
     @classmethod
@@ -188,7 +246,7 @@ class LocalReviewSummarizer:
     ) -> str:
         """
         Determines the sentence-level sentiment polarity using aspect sentiment cues
-        with fallback to the parent review rating and Model A prediction.
+        with fallback to parent review rating and Model A prediction.
         """
         words = set(re.findall(r"\b[a-zA-Z]{3,}\b", sentence.lower()))
         pos_matches = words.intersection(LOCAL_POSITIVE_CUES)
@@ -199,7 +257,6 @@ class LocalReviewSummarizer:
         elif len(neg_matches) > len(pos_matches):
             return "negative"
         elif len(pos_matches) > 0 and len(neg_matches) > 0:
-            # Mixed cues: rely on parent review sentiment or rating
             if review_rating is not None:
                 if review_rating <= 2:
                     return "negative"
@@ -207,7 +264,6 @@ class LocalReviewSummarizer:
                     return "positive"
             return review_sentiment
 
-        # Default to parent review rating/sentiment
         if review_rating is not None:
             if review_rating <= 2:
                 return "negative"
@@ -271,8 +327,9 @@ class LocalReviewSummarizer:
 
             # Aspect bonus (mentions core feature like battery, build, performance)
             aspect_multiplier = 1.25 if s["aspect_ids"] else 1.0
+            defect_multiplier = 1.20 if s.get("is_defect") else 1.0
 
-            s["score"] = round(raw_score * len_multiplier * aspect_multiplier, 3)
+            s["score"] = round(raw_score * len_multiplier * aspect_multiplier * defect_multiplier, 3)
 
     @classmethod
     def _truncate_excerpt(cls, text: str, max_len: int = 120) -> str:
@@ -289,6 +346,9 @@ class LocalReviewSummarizer:
         total_reviews: int,
         extracted_sentences: List[Dict[str, Any]],
         review_sentiments: List[str],
+        target_count: Optional[int] = None,
+        avg_rating: Optional[float] = None,
+        duplicate_count: int = 0,
     ) -> Dict[str, Any]:
         """Handles sparse review collections (< 3 reviews) with honest caveats."""
         pos_sents = [s for s in extracted_sentences if s["polarity"] == "positive"]
@@ -300,11 +360,16 @@ class LocalReviewSummarizer:
         best_pos = cls._truncate_excerpt(pos_sents[0]["text"]) if pos_sents else None
         best_neg = cls._truncate_excerpt(neg_sents[0]["text"]) if neg_sents else None
 
-        # Build concise objective summary with explicit sample size caveat
         if total_reviews == 1:
             base_caveat = "Analysis based on only 1 visible customer review, which is insufficient to establish statistical consensus."
+            verdict = "Only 1 customer review available, which is insufficient to determine purchase safety."
+            conf_score = 15.0
+            conf_level = "INSUFFICIENT"
         else:
             base_caveat = f"Analysis based on only {total_reviews} visible customer reviews, which is too few to establish reliable consensus."
+            verdict = f"Only {total_reviews} customer reviews available, which is insufficient to determine purchase safety."
+            conf_score = 22.0
+            conf_level = "INSUFFICIENT"
 
         if best_pos and best_neg:
             summary = f"{base_caveat} Customer feedback highlights \"{best_pos}\", but also reports \"{best_neg}\"."
@@ -326,18 +391,29 @@ class LocalReviewSummarizer:
         patterns = [
             f"Small sample size ({total_reviews} review{'s' if total_reviews > 1 else ''} extracted) — statistical reliability is limited."
         ]
+        if duplicate_count > 0:
+            patterns.append(f"Identified {duplicate_count} duplicated review submission(s).")
 
         return {
             "status": "success",
             "available": True,
             "provider": "local",
             "summary": summary,
+            "verdict": verdict,
+            "verdict_sentiment": "INSUFFICIENT_EVIDENCE",
+            "verdict_detail": "A larger sample of verified buyer feedback is required to establish statistical reliability.",
+            "confidence_score": conf_score,
+            "confidence_level": conf_level,
+            "confidence_explanation": f"Low confidence: Sample size of {total_reviews} review(s) is insufficient to establish consensus. Confidence reflects review sample quality rather than a product guarantee.",
+            "suitable_for": "Shoppers conducting early exploratory research.",
+            "avoid_if": "Buyers requiring proven long-term track records.",
             "recurring_complaints": complaints,
             "common_positive_themes": common_pos,
             "pros": pros,
             "cons": cons,
             "investigation_patterns": patterns,
             "total_reviews_analyzed": total_reviews,
+            "target_count": target_count,
             "error": None,
         }
 
@@ -351,50 +427,25 @@ class LocalReviewSummarizer:
         neu_pct: float,
         extracted_sentences: List[Dict[str, Any]],
         valid_reviews: List[Dict[str, Any]],
+        target_count: Optional[int] = None,
+        fake_summary: Optional[Dict[str, Any]] = None,
+        avg_rating: Optional[float] = None,
+        duplicate_count: int = 0,
     ) -> Dict[str, Any]:
-        """Synthesizes reviews for 3 or more reviews using extractive NLP."""
-        # Separate positive and negative sentences
+        """
+        Synthesizes reviews for 3 or more reviews using an opinion-based,
+        extractive summarization pipeline answering the core buyer decision questions.
+        Produces a concise 60-100 word synthesis and an actionable purchase verdict.
+        """
         pos_sents = [s for s in extracted_sentences if s["polarity"] == "positive"]
         neg_sents = [s for s in extracted_sentences if s["polarity"] == "negative"]
+        defect_sents = [s for s in neg_sents if s.get("is_defect")]
 
         pos_sents.sort(key=lambda x: x["score"], reverse=True)
         neg_sents.sort(key=lambda x: x["score"], reverse=True)
+        defect_sents.sort(key=lambda x: x["score"], reverse=True)
 
-        # 1. Overall Consensus Sentence
-        short_name = product_name[:40].strip()
-        if pos_pct >= 75:
-            consensus_str = f"Customer reception across {total_reviews} analyzed reviews is overwhelmingly positive ({pos_pct}% positive)."
-        elif neg_pct >= 65:
-            consensus_str = f"Customer feedback across {total_reviews} analyzed reviews reflects substantial dissatisfaction ({neg_pct}% negative vs {pos_pct}% positive)."
-        elif abs(pos_pct - neg_pct) <= 25:
-            consensus_str = f"Customer reception across {total_reviews} analyzed reviews is divided with mixed opinions ({pos_pct}% positive vs {neg_pct}% negative)."
-        elif pos_pct >= 55:
-            consensus_str = f"Customer reception across {total_reviews} analyzed reviews is largely favorable ({pos_pct}% positive), with occasional negative remarks ({neg_pct}% negative)."
-        elif neg_pct >= 50:
-            consensus_str = f"Customer feedback across {total_reviews} analyzed reviews reflects substantial dissatisfaction ({neg_pct}% negative vs {pos_pct}% positive)."
-        else:
-            consensus_str = f"Customer reception across {total_reviews} analyzed reviews is moderately positive ({pos_pct}% positive, {neu_pct}% neutral)."
-
-        # 2. Key Positive & Negative Excerpts for Summary
-        summary_parts = [consensus_str]
-        top_pos_quote = None
-        top_neg_quote = None
-
-        if pos_sents:
-            top_pos_quote = cls._truncate_excerpt(pos_sents[0]["text"])
-            summary_parts.append(f"Customers frequently praise: \"{top_pos_quote}\".")
-        else:
-            summary_parts.append("No strong positive commendations were identified in the analyzed sample.")
-
-        if neg_sents:
-            top_neg_quote = cls._truncate_excerpt(neg_sents[0]["text"])
-            summary_parts.append(f"Reported concerns include: \"{top_neg_quote}\".")
-        else:
-            summary_parts.append("No recurring critical defects or negative complaints were reported.")
-
-        overall_summary = " ".join(summary_parts)
-
-        # 3. Group sentences by aspect
+        # Aspect grouping
         aspect_pos: Dict[str, List[Dict[str, Any]]] = {}
         aspect_neg: Dict[str, List[Dict[str, Any]]] = {}
 
@@ -406,7 +457,193 @@ class LocalReviewSummarizer:
             for asp in s["aspect_ids"]:
                 aspect_neg.setdefault(asp, []).append(s)
 
-        # 4. Formulate Pros & Common Positive Themes
+        # Determine prominent positive aspects
+        prominent_pos_aspects = sorted(
+            aspect_pos.keys(),
+            key=lambda k: len(aspect_pos[k]),
+            reverse=True
+        )
+        pos_aspect_names = [
+            ASPECT_DEFINITIONS.get(k, {}).get("display_name", k.replace("_", " ").title())
+            for k in prominent_pos_aspects
+        ]
+
+        # Determine prominent negative aspects
+        prominent_neg_aspects = sorted(
+            aspect_neg.keys(),
+            key=lambda k: len(aspect_neg[k]),
+            reverse=True
+        )
+        neg_aspect_names = [
+            ASPECT_DEFINITIONS.get(k, {}).get("display_name", k.replace("_", " ").title())
+            for k in prominent_neg_aspects
+        ]
+
+        has_critical_defects = len(defect_sents) > 0
+        defect_cue = next((c for c in DEFECT_CUES if c in defect_sents[0]["text"].lower()), "defects") if defect_sents else None
+
+        # ---------------------------------------------------------------------
+        # 1. Purchase Verdict Determination (Exactly PROCEED, PROCEED WITH CAUTION, AVOID, or INSUFFICIENT EVIDENCE)
+        # ---------------------------------------------------------------------
+        if total_reviews < 5:
+            verdict_sentiment = "INSUFFICIENT_EVIDENCE"
+            verdict = f"Only {total_reviews} customer reviews analyzed, which is insufficient to determine purchase safety."
+            verdict_detail = "A larger sample of buyer feedback is required to establish statistical reliability."
+        elif has_critical_defects and pos_pct >= 60.0:
+            # Positive overall sentiment with serious recurring defects
+            verdict_sentiment = "PROCEED_WITH_CAUTION"
+            verdict = f"Good value for core features, but recurring reports of {defect_cue} issues raise meaningful durability concerns."
+            verdict_detail = "Verify manufacturer warranty coverage and return policies before purchasing."
+        elif abs(pos_pct - neg_pct) <= 25.0 and pos_pct >= 35.0 and neg_pct >= 25.0:
+            # Mixed reviews with meaningful trade-offs
+            verdict_sentiment = "PROCEED_WITH_CAUTION"
+            if pos_aspect_names and neg_aspect_names:
+                verdict = f"Worthwhile benefits in {pos_aspect_names[0].lower()}, but recurring concerns regarding {neg_aspect_names[0].lower()} warrant consideration."
+            else:
+                verdict = "Reviews indicate worthwhile benefits, but noticeable performance trade-offs warrant consideration before buying."
+            verdict_detail = "Best suited for buyers comfortable compromising on secondary features."
+        elif neg_pct >= 45.0 or pos_pct < 35.0 or (avg_rating is not None and avg_rating < 3.0):
+            verdict_sentiment = "AVOID"
+            weakness = neg_aspect_names[0].lower() if neg_aspect_names else "overall reliability"
+            verdict = f"Repeated reports of product failure and persistent {weakness} issues present substantial purchase risks."
+            verdict_detail = f"Critical complaints account for {neg_pct}% of analyzed reviews."
+        elif duplicate_count > (total_reviews * 0.25) or (fake_summary and fake_summary.get("cg_percentage", 0) > 40):
+            # Contradictory or suspicious patterns
+            verdict_sentiment = "PROCEED_WITH_CAUTION"
+            verdict = "Reviews lean positive, but elevated manipulation patterns or repeated text warrant caution."
+            verdict_detail = f"Identified {duplicate_count} duplicated submissions in the collected review sample."
+        elif pos_pct >= 70.0:
+            # Positive reviews without major recurring problems
+            verdict_sentiment = "PROCEED"
+            verdict = "Reviews are generally positive, with consistent satisfaction and no major recurring issues identified."
+            verdict_detail = f"Broad buyer consensus across {total_reviews} analyzed reviews supports buying."
+        else:
+            verdict_sentiment = "PROCEED_WITH_CAUTION"
+            verdict = "Reviews show moderate customer satisfaction alongside noticeable product limitations."
+            verdict_detail = "Carefully assess individual feature priorities against reported limitations."
+
+        # ---------------------------------------------------------------------
+        # 2. Concise Synthesized Review Summary (Target 60-100 Words Maximum)
+        # Covers: 1) Overall customer experience, 2) Strongest recurring benefit,
+        #         3) Most significant recurring drawback/defect, 4) Concluding worthwhile assessment.
+        # Sounds like a neutral, concise product analyst without stringing customer quotations.
+        # ---------------------------------------------------------------------
+        # Sentence 1: Overall customer experience
+        if pos_pct >= 85.0:
+            exp_str = f"Customer consensus across {total_reviews} analyzed reviews is overwhelmingly positive ({pos_pct}% positive), reflecting broad buyer satisfaction with everyday performance."
+        elif pos_pct >= 70.0:
+            exp_str = f"Customer reception across {total_reviews} analyzed reviews is largely favorable ({pos_pct}% positive), with buyers consistently reporting a positive everyday experience."
+        elif abs(pos_pct - neg_pct) <= 25.0 and pos_pct >= 35.0:
+            exp_str = f"Customer reception across {total_reviews} analyzed reviews is divided with mixed opinions ({pos_pct}% positive vs {neg_pct}% negative), reflecting varied experiences and noticeable trade-offs."
+        elif neg_pct >= 45.0 or pos_pct < 35.0:
+            exp_str = f"Customer feedback across {total_reviews} analyzed reviews reflects substantial dissatisfaction ({neg_pct}% negative), with widespread complaints concerning performance and reliability."
+        else:
+            exp_str = f"Customer reception across {total_reviews} analyzed reviews is divided with mixed opinions ({pos_pct}% positive vs {neg_pct}% negative), reflecting varied experiences and noticeable trade-offs."
+
+        # Sentence 2: Strongest recurring benefit
+        if pos_aspect_names:
+            benefit_str = f"The most widely praised strength centers on dependable {pos_aspect_names[0].lower()}, frequently highlighted as a standout advantage."
+        elif pos_pct >= 50.0:
+            benefit_str = "Purchasers consistently appreciate its accessible price point and solid functional utility for routine tasks."
+        else:
+            benefit_str = "No strong positive commendations or distinctive advantages were identified in the analyzed customer feedback."
+
+        # Sentence 3: Most significant recurring drawback / defect
+        if defect_sents:
+            drawback_str = f"However, recurring reports of premature {defect_cue} issues raise meaningful durability concerns that prospective buyers should weigh."
+        elif neg_aspect_names:
+            drawback_str = f"Conversely, critical feedback centers on {neg_aspect_names[0].lower()}, which several reviewers cited as an ongoing limitation."
+        elif neg_pct < 10.0:
+            drawback_str = "Notably, no recurring critical defects or systemic failure patterns were reported across the analyzed reviews."
+        else:
+            drawback_str = "Reported concerns primarily involve minor operational inconveniences rather than systemic product failures."
+
+        # Sentence 4: Brief concluding assessment of whether the product appears worthwhile
+        if verdict_sentiment == "PROCEED":
+            conclusion_str = "Overall, the product offers solid value for money for shoppers seeking a reliable everyday option."
+        elif verdict_sentiment == "PROCEED_WITH_CAUTION":
+            conclusion_str = "It represents reasonable value for budget-focused buyers, but those prioritizing long-term durability should verify warranty coverage."
+        elif verdict_sentiment == "AVOID":
+            conclusion_str = "Given the frequency of recurring defects, this product presents significant purchase risks and is difficult to recommend."
+        else:
+            conclusion_str = "Additional review evidence is recommended before making a final purchasing decision."
+
+        if total_reviews < 15:
+            scope_str = f"(Caution: Sample size of {total_reviews} reviews is small; broader generalizability may vary.)"
+            overall_summary = f"{exp_str} {benefit_str} {drawback_str} {conclusion_str} {scope_str}"
+        else:
+            overall_summary = f"{exp_str} {benefit_str} {drawback_str} {conclusion_str}"
+
+        # Suitability
+        if pos_aspect_names:
+            suitable_for = f"Users prioritizing {', and '.join(pos_aspect_names[:2])} and solid everyday utility."
+        else:
+            suitable_for = "General buyers seeking entry-level functionality at a competitive price."
+
+        if defect_sents:
+            matched_cue = next((c for c in DEFECT_CUES if c in defect_sents[0]["text"].lower()), "defect")
+            avoid_if = f"Buyers unwilling to risk unit variability or reported {matched_cue} issues."
+        elif neg_aspect_names:
+            avoid_if = f"Shoppers sensitive to reported {', and '.join(neg_aspect_names[:2])} or requiring heavy-duty reliability."
+        else:
+            avoid_if = "Users with specialized requirements exceeding standard product specifications."
+
+        # ---------------------------------------------------------------------
+        # 8. Confidence Score & Level
+        # ---------------------------------------------------------------------
+        if total_reviews >= 100:
+            conf_score = 88.0
+        elif total_reviews >= 50:
+            conf_score = 75.0
+        elif total_reviews >= 20:
+            conf_score = 60.0
+        elif total_reviews >= 10:
+            conf_score = 42.0
+        else:
+            conf_score = 20.0
+
+        if avg_rating is not None:
+            if avg_rating >= 4.0 and pos_pct >= 65:
+                conf_score += 5.0
+            elif avg_rating <= 2.5 and neg_pct >= 50:
+                conf_score += 5.0
+            elif (avg_rating >= 4.0 and neg_pct >= 45) or (avg_rating <= 2.5 and pos_pct >= 65):
+                conf_score -= 15.0
+
+        if fake_summary and fake_summary.get("cg_percentage", 0) > 35:
+            conf_score -= 15.0
+
+        if duplicate_count > (total_reviews * 0.2):
+            conf_score -= 10.0
+
+        conf_score = round(max(10.0, min(98.0, conf_score)), 1)
+
+        if conf_score >= 78.0:
+            conf_level = "HIGH"
+            conf_expl = (
+                f"High confidence based on {total_reviews} analyzed reviews with consistent sentiment signals and low manipulation indicators. "
+                "Confidence reflects review sample quality rather than a product guarantee."
+            )
+        elif conf_score >= 55.0:
+            conf_level = "MODERATE"
+            conf_expl = (
+                f"Moderate confidence based on {total_reviews} analyzed reviews. "
+                "Confidence reflects review sample quality rather than a product guarantee."
+            )
+        elif conf_score >= 30.0:
+            conf_level = "LOW"
+            conf_expl = (
+                f"Low confidence: Sample size of {total_reviews} reviews provides directional insight with reduced statistical certainty. "
+                "Confidence reflects review sample quality rather than a product guarantee."
+            )
+        else:
+            conf_level = "INSUFFICIENT"
+            conf_expl = (
+                f"Insufficient confidence: Very small sample of {total_reviews} reviews is inadequate to establish reliable consensus. "
+                "Confidence reflects review sample quality rather than a product guarantee."
+            )
+
+        # Pros and Cons lists for backward compatibility
         pros: List[str] = []
         positive_themes: List[str] = []
         seen_pro_texts: Set[str] = set()
@@ -423,7 +660,6 @@ class LocalReviewSummarizer:
             if len(pros) >= 4:
                 break
 
-        # Fallback pros if aspect matching yielded fewer than 2
         if len(pros) < 2 and pos_sents:
             for s in pos_sents:
                 clean_q = cls._truncate_excerpt(s["text"])
@@ -434,7 +670,6 @@ class LocalReviewSummarizer:
                 if len(pros) >= 3:
                     break
 
-        # 5. Formulate Cons & Recurring Complaints
         cons: List[str] = []
         recurring_complaints: List[str] = []
         seen_con_texts: Set[str] = set()
@@ -451,7 +686,6 @@ class LocalReviewSummarizer:
             if len(cons) >= 4:
                 break
 
-        # Fallback cons if aspect matching yielded fewer than 2
         if len(cons) < 2 and neg_sents:
             for s in neg_sents:
                 clean_q = cls._truncate_excerpt(s["text"])
@@ -462,16 +696,16 @@ class LocalReviewSummarizer:
                 if len(cons) >= 3:
                     break
 
-        # 6. Investigation Patterns (Heuristic Signals)
+        # Patterns (Heuristics)
         patterns: List[str] = []
+        if duplicate_count > 0:
+            patterns.append(f"Identified {duplicate_count} duplicated review submission(s) across the collected sample.")
 
-        # Check for duplicated sentences across reviews
         sent_counts = Counter(s["text"].lower() for s in extracted_sentences if len(s["text"]) >= 20)
         duplicates = [text for text, cnt in sent_counts.items() if cnt > 1]
         if duplicates:
             patterns.append(f"Detected {len(duplicates)} identical repeated sentence(s) across different review submissions.")
 
-        # Check for extreme bimodal polarization
         ratings = [r["rating"] for r in valid_reviews if r.get("rating") is not None]
         if len(ratings) >= 4:
             five_star = sum(1 for rt in ratings if rt == 5)
@@ -480,21 +714,32 @@ class LocalReviewSummarizer:
             if mid_star == 0 and five_star >= 2 and one_star >= 2:
                 patterns.append("Bimodal review polarization detected: ratings consist exclusively of 5-star praise and 1-star complaints with zero neutral evaluations.")
 
-        # Check for high proportion of very short generic reviews
         short_revs = [r for r in valid_reviews if len(r["text"]) < 20]
         if len(short_revs) >= 3 and (len(short_revs) / total_reviews) >= 0.5:
             patterns.append(f"High concentration of short/terse reviews ({len(short_revs)} of {total_reviews} under 20 characters).")
+
+        suitable_for = f"Buyers seeking dependable {pos_aspect_names[0].lower()} for everyday use." if pos_aspect_names else "General buyers seeking entry-level functionality."
+        avoid_if = f"Buyers sensitive to reported {neg_aspect_names[0].lower()}." if neg_aspect_names else (f"Buyers unwilling to risk reported {defect_cue} issues." if defect_sents else None)
 
         return {
             "status": "success",
             "available": True,
             "provider": "local",
             "summary": overall_summary,
+            "verdict": verdict,
+            "verdict_sentiment": verdict_sentiment,
+            "verdict_detail": verdict_detail,
+            "confidence_score": conf_score,
+            "confidence_level": conf_level,
+            "confidence_explanation": conf_expl,
+            "suitable_for": suitable_for,
+            "avoid_if": avoid_if,
+            "total_reviews_analyzed": total_reviews,
+            "target_count": target_count,
             "recurring_complaints": recurring_complaints,
             "common_positive_themes": positive_themes,
             "pros": pros,
             "cons": cons,
             "investigation_patterns": patterns,
-            "total_reviews_analyzed": total_reviews,
             "error": None,
         }

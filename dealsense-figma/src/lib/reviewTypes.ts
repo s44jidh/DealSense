@@ -80,6 +80,16 @@ export interface LLMReviewSummaryResponse {
   available: boolean;
   provider?: string | null;
   summary: string;
+  verdict?: string | null;
+  verdict_sentiment?: string | null;
+  verdict_detail?: string | null;
+  confidence_score?: number | null;
+  confidence_level?: string | null;
+  confidence_explanation?: string | null;
+  suitable_for?: string | null;
+  avoid_if?: string | null;
+  total_reviews_analyzed?: number | null;
+  target_count?: number | null;
   recurring_complaints: string[];
   common_positive_themes: string[];
   pros: string[];
@@ -129,6 +139,8 @@ export interface BatchReviewAnalysisResponse {
   trust_score: number;
   data_limitations: string;
   analyzed_reviews: AnalyzedReviewItem[];
+  rating_distribution?: Record<string, number>;
+  target_reviews_count?: number;
 }
 
 export interface ComparableOffer {

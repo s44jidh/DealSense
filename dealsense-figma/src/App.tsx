@@ -5,6 +5,7 @@ import { ScreenRouter, type View } from "./components/screens";
 import { Sun, Moon, Settings, Logo } from "./components/icons";
 import {
   extractActiveTabProduct,
+  collectTabReviews,
   type ExtractedProduct,
 } from "./lib/extractor";
 import type {
@@ -56,6 +57,7 @@ export default function App() {
     "live_dom" | "demo" | "manual"
   >("live_dom");
   const [isDemoMode, setIsDemoMode] = useState<boolean>(false);
+  const [targetReviewCount, setTargetReviewCount] = useState<number>(100);
 
   const currentRequestIdRef = useRef<number>(0);
   const activeProductKeyRef = useRef<string>("");
@@ -105,6 +107,7 @@ export default function App() {
         product_name: product.product_name,
         url: product.url,
         source_retailer: product.source_retailer || "Amazon.in",
+        target_count: targetReviewCount,
         reviews: reviewsToSend.map((r, i) => ({
           id: r.id || `rev_${i + 1}`,
           text: r.text,
@@ -308,33 +311,114 @@ export default function App() {
   /**
    * Primary action on Ready screen: analyze reviews (Requirement 3, 4, 5, 6)
    * Strictly uses only reviews belonging to the detected product.
+   * Multi-page collection expands review depth to targetCount (100 or 300).
    * If reviews cannot be retrieved, displays honest error state.
    */
-  const handleAnalyze = useCallback(() => {
+  const handleAnalyze = useCallback(async () => {
     if (!extractedProduct) return;
-    const reviews = extractedProduct.reviews || [];
+    const currentReviews = extractedProduct.reviews || [];
 
     console.log("[DealSense Debug Analyze Triggered]", {
       title: extractedProduct.product_name,
       asin: extractedProduct.asin || extractedProduct.retailer_product_id || "N/A",
       url: extractedProduct.url,
-      reviewCount: reviews.length,
+      currentReviewCount: currentReviews.length,
+      targetReviewCount,
       source: isDemoMode ? "demo" : "live_dom",
     });
 
-    if (reviews.length === 0) {
-      // Requirement 5: If review extraction fails, show clear honest state rather than dummy reviews
-      setReviewError(
-        "Could not retrieve customer reviews from this page. Please ensure customer reviews are visible (scroll down on Amazon if needed), then click Retry."
-      );
-      setReviewAnalysis(null);
-      setView("result");
+    if (isDemoMode || analysisSource === "manual") {
+      if (currentReviews.length === 0) {
+        setReviewError(
+          "Could not retrieve customer reviews. Please click 'Try Demo Mode' or paste review text manually."
+        );
+        setReviewAnalysis(null);
+        setView("result");
+        return;
+      }
+      runReviewAnalysis(extractedProduct, currentReviews, isDemoMode ? "demo" : "manual", true);
       return;
     }
 
-    // Requirement 3 & 4: Collect ONLY reviews belonging to the detected product
-    runReviewAnalysis(extractedProduct, reviews, isDemoMode ? "demo" : "live_dom", true);
-  }, [extractedProduct, isDemoMode, runReviewAnalysis]);
+    // If active product already has enough reviews for the chosen target, analyze directly
+    if (currentReviews.length >= targetReviewCount) {
+      runReviewAnalysis(extractedProduct, currentReviews, "live_dom", true);
+      return;
+    }
+
+    // Trigger multi-page review collection in active tab
+    setView("analyzing");
+    setReviewLoading(true);
+    setReviewError(null);
+
+    try {
+      const collectRes = await collectTabReviews({
+        targetCount: targetReviewCount,
+        maxCount: targetReviewCount === 300 ? 300 : 100,
+        diversify: true,
+      });
+
+      let reviewsToAnalyze = currentReviews;
+      let pagesScanned = extractedProduct.scan_metadata?.pages_scanned || 1;
+      let hasMore = extractedProduct.scan_metadata?.has_more ?? false;
+      let limitationNote = extractedProduct.scan_metadata?.limitation_note ?? null;
+      let ratingDist = extractedProduct.scan_metadata?.rating_distribution;
+
+      if (collectRes && collectRes.reviews && collectRes.reviews.length > 0) {
+        reviewsToAnalyze = collectRes.reviews;
+        pagesScanned = collectRes.pages_scanned;
+        hasMore = collectRes.has_more;
+        limitationNote = collectRes.limitation_note || null;
+        ratingDist = collectRes.rating_distribution;
+
+        const updatedProd: ExtractedProduct = {
+          ...extractedProduct,
+          reviews: collectRes.reviews,
+          scan_metadata: {
+            pages_scanned: pagesScanned,
+            total_reviews_found: collectRes.total_collected,
+            has_more: hasMore,
+            limitation_note: limitationNote,
+            target_count: targetReviewCount,
+            rating_distribution: ratingDist,
+          },
+        };
+        setExtractedProduct(updatedProd);
+      }
+
+      if (reviewsToAnalyze.length === 0) {
+        setReviewLoading(false);
+        setReviewError(
+          "Could not retrieve customer reviews from this page. Please ensure customer reviews are visible (scroll down on Amazon if needed), then click Retry."
+        );
+        setReviewAnalysis(null);
+        setView("result");
+        return;
+      }
+
+      runReviewAnalysis(
+        {
+          ...extractedProduct,
+          reviews: reviewsToAnalyze,
+          scan_metadata: {
+            pages_scanned: pagesScanned,
+            total_reviews_found: reviewsToAnalyze.length,
+            has_more: hasMore,
+            limitation_note: limitationNote,
+            target_count: targetReviewCount,
+            rating_distribution: ratingDist,
+          },
+        },
+        reviewsToAnalyze,
+        "live_dom",
+        true
+      );
+    } catch (err: any) {
+      setReviewLoading(false);
+      setReviewError(err.message || "Failed to collect multi-page customer reviews.");
+      setView("result");
+    }
+  }, [extractedProduct, isDemoMode, analysisSource, targetReviewCount, runReviewAnalysis]);
 
   /**
    * Dedicated Demo Mode loader - explicitly isolated (Requirement 6)
@@ -458,6 +542,8 @@ export default function App() {
           comparisonLoading={comparisonLoading}
           comparisonError={comparisonError}
           onComparePrices={(customQuery?: string) => extractedProduct && handleComparePrices(extractedProduct, customQuery)}
+          targetReviewCount={targetReviewCount}
+          onSetTargetReviewCount={setTargetReviewCount}
         />
       </main>
     </div>

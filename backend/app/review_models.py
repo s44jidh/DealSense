@@ -73,6 +73,16 @@ class LLMReviewSummaryResponse(BaseModel):
     available: bool
     provider: Optional[str] = None
     summary: str
+    verdict: Optional[str] = None
+    verdict_sentiment: Optional[str] = None
+    verdict_detail: Optional[str] = None
+    confidence_score: Optional[float] = None
+    confidence_level: Optional[str] = None
+    confidence_explanation: Optional[str] = None
+    suitable_for: Optional[str] = None
+    avoid_if: Optional[str] = None
+    total_reviews_analyzed: Optional[int] = None
+    target_count: Optional[int] = None
     recurring_complaints: list[str] = Field(default_factory=list)
     common_positive_themes: list[str] = Field(default_factory=list)
     pros: list[str] = Field(default_factory=list)
@@ -130,6 +140,7 @@ class BatchReviewAnalysisRequest(BaseModel):
     url: Optional[str] = None
     source_retailer: Optional[str] = "Amazon.in"
     reviews: list[ReviewItem] = Field(default_factory=list)
+    target_count: Optional[int] = None
 
 
 class BatchReviewAnalysisResponse(BaseModel):
@@ -151,6 +162,8 @@ class BatchReviewAnalysisResponse(BaseModel):
     trust_score: float
     data_limitations: str
     analyzed_reviews: list[dict[str, Any]]
+    rating_distribution: Optional[dict[str, int]] = Field(default_factory=dict)
+    target_reviews_count: Optional[int] = None
 
 
 class ModelStatusResponse(BaseModel):

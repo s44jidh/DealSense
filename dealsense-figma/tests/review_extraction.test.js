@@ -577,3 +577,214 @@ test("HTML Fixture Test: Amazon India product detail page (/dp/) with JSON-LD an
   assert.strictEqual(product.reviews[0].title, "Flawless plug and play on PC");
   assert.strictEqual(product.reviews[0].date, "05 October 2024");
 });
+
+test("Multi-Page Review Collection - Rating distribution calculation (1★ to 5★)", () => {
+  const reviews = [
+    { id: "1", text: "Great product", rating: 5 },
+    { id: "2", text: "Very good", rating: 4 },
+    { id: "3", text: "Average quality", rating: 3 },
+    { id: "4", text: "Disappointed", rating: 2 },
+    { id: "5", text: "Defective item", rating: 1 },
+    { id: "6", text: "Excellent", rating: 5 },
+    { id: "7", text: "No rating text", rating: null },
+  ];
+
+  const dist = calculateRatingDistribution(reviews);
+  assert.strictEqual(dist["5"], 2);
+  assert.strictEqual(dist["4"], 1);
+  assert.strictEqual(dist["3"], 1);
+  assert.strictEqual(dist["2"], 1);
+  assert.strictEqual(dist["1"], 1);
+  assert.strictEqual(dist["unrated"], 1);
+});
+
+test("Multi-Page Review Collection - Deduplication by ID and normalized text", async () => {
+  const doc = createMockDocument();
+  const root = node("div", { id: "dp" });
+  doc.appendChild(root);
+
+  // Review with ID R1
+  const rev1 = node("div", { "data-hook": "review", id: "R1" });
+  const b1 = node("span", { "data-hook": "review-body" });
+  b1.appendChild(node("span", {}, "Sturdy controller with responsive joysticks."));
+  rev1.appendChild(b1);
+  root.appendChild(rev1);
+
+  // Duplicate Review with identical ID R1
+  const rev2 = node("div", { "data-hook": "review", id: "R1" });
+  const b2 = node("span", { "data-hook": "review-body" });
+  b2.appendChild(node("span", {}, "Sturdy controller with responsive joysticks."));
+  rev2.appendChild(b2);
+  root.appendChild(rev2);
+
+  // Review with different ID but identical text content
+  const rev3 = node("div", { "data-hook": "review", id: "R2" });
+  const b3 = node("span", { "data-hook": "review-body" });
+  b3.appendChild(node("span", {}, "Sturdy controller with responsive joysticks."));
+  rev3.appendChild(b3);
+  root.appendChild(rev3);
+
+  // Genuinely distinct review
+  const rev4 = node("div", { "data-hook": "review", id: "R3" });
+  const b4 = node("span", { "data-hook": "review-body" });
+  b4.appendChild(node("span", {}, "Battery drains too quickly during intense play sessions."));
+  rev4.appendChild(b4);
+  root.appendChild(rev4);
+
+  setupGlobalEnvironment(doc, "https://www.amazon.in/dp/B0B8S9K8R5");
+  const result = await collectMultiPageReviews({ targetCount: 100 });
+
+  assert.strictEqual(result.total_collected, 2, "Duplicate review ID and identical text must be deduplicated to 2 unique reviews");
+  assert.strictEqual(result.reviews[0].id, "R1");
+  assert.strictEqual(result.reviews[1].id, "R3");
+});
+
+test("Multi-Page Review Collection - Q&A and non-review text exclusion", async () => {
+  const doc = createMockDocument();
+  const root = node("div", { id: "dp" });
+  doc.appendChild(root);
+
+  // Real review
+  const rev1 = node("div", { "data-hook": "review", id: "REV_REAL" });
+  const b1 = node("span", { "data-hook": "review-body" });
+  b1.appendChild(node("span", {}, "The controller connects easily via bluetooth to PC."));
+  rev1.appendChild(b1);
+  root.appendChild(rev1);
+
+  // Question header mistakenly captured
+  const qaCard = node("div", { "data-hook": "review", id: "QA_FAKE" });
+  const bQA = node("span", { "data-hook": "review-body" });
+  bQA.appendChild(node("span", {}, "Q: Does this work with Windows 11? Have a question? Ask here."));
+  qaCard.appendChild(bQA);
+  root.appendChild(qaCard);
+
+  setupGlobalEnvironment(doc, "https://www.amazon.in/dp/B0B8S9K8R5");
+  const result = await collectMultiPageReviews({ targetCount: 100 });
+
+  assert.strictEqual(result.total_collected, 1, "Q&A text should be excluded from review collection");
+  assert.strictEqual(result.reviews[0].id, "REV_REAL");
+});
+
+test("Extensive Review Analysis - Synthesized summary schema & UI contract compliance", () => {
+  // Mock LLM summary object returned by backend /api/reviews/analyze-batch
+  const mockSummaryResponse = {
+    status: "success",
+    available: true,
+    provider: "local",
+    summary: "Customer reception across 100 analyzed reviews is largely favorable (80.0% positive), with buyers consistently reporting a positive everyday experience. The most widely praised strength centers on dependable battery life & charging, frequently highlighted as a standout advantage. Reviewers report few recurring hardware or software issues during standard usage. Overall, the product offers solid value for money for shoppers seeking a reliable everyday option.",
+    verdict: "Reviews are generally positive, with consistent satisfaction and no major recurring issues identified.",
+    verdict_sentiment: "PROCEED",
+    verdict_detail: "Broad buyer consensus across 100 analyzed reviews supports buying.",
+    confidence_score: 93.0,
+    confidence_level: "HIGH",
+    confidence_explanation: "High confidence based on 100 analyzed reviews with consistent sentiment signals and low manipulation indicators. Confidence reflects review sample quality rather than a product guarantee.",
+    total_reviews_analyzed: 100,
+    target_count: 100,
+  };
+
+  // 1. Verify concise synthesized summary (60-100 words maximum, zero raw review quotations)
+  const words = mockSummaryResponse.summary.split(/\s+/);
+  assert.ok(words.length >= 50 && words.length <= 100, `Word count (${words.length}) must be in 60-100 words range`);
+  assert.ok(!mockSummaryResponse.summary.includes('"'), "Summary must not concatenate raw customer quotations");
+  assert.ok(mockSummaryResponse.summary.includes("largely favorable"));
+  assert.ok(mockSummaryResponse.summary.includes("value for money"));
+
+  // 2. Verify Actionable Purchase Verdict card properties
+  assert.strictEqual(mockSummaryResponse.verdict_sentiment, "PROCEED");
+  assert.ok(mockSummaryResponse.verdict.length > 20);
+  assert.ok(mockSummaryResponse.verdict.includes("no major recurring issues"));
+  assert.ok(mockSummaryResponse.verdict_detail.includes("supports buying"));
+
+  // 3. Verify Evidence Confidence Indicator properties & explicit disclaimer
+  assert.strictEqual(mockSummaryResponse.confidence_level, "HIGH");
+  assert.strictEqual(mockSummaryResponse.confidence_score, 93.0);
+  assert.ok(mockSummaryResponse.confidence_explanation.includes("sample quality rather than a product guarantee"));
+
+  // 4. Verify target vs analyzed counts
+  assert.strictEqual(mockSummaryResponse.total_reviews_analyzed, 100);
+  assert.strictEqual(mockSummaryResponse.target_count, 100);
+});
+
+test("Extensive Review Analysis - Minority defect detection yields PROCEED WITH CAUTION verdict", () => {
+  const defectSummaryResponse = {
+    status: "success",
+    available: true,
+    provider: "local",
+    summary: "Customer reception across 100 analyzed reviews is largely favorable (85.0% positive), with buyers consistently reporting a positive everyday experience. The most widely praised strength centers on dependable responsiveness, frequently highlighted as a standout advantage. However, recurring reports of premature drift issues raise meaningful durability concerns that prospective buyers should weigh. It represents reasonable value for budget-focused buyers, but those prioritizing long-term durability should verify warranty coverage.",
+    verdict: "Good value for core features, but recurring reports of drift issues raise meaningful durability concerns.",
+    verdict_sentiment: "PROCEED_WITH_CAUTION",
+    verdict_detail: "Verify manufacturer warranty coverage and return policies before purchasing.",
+    confidence_score: 88.0,
+    confidence_level: "HIGH",
+    confidence_explanation: "High confidence based on 100 analyzed reviews. Confidence reflects review sample quality rather than a product guarantee.",
+    total_reviews_analyzed: 100,
+    target_count: 100,
+  };
+
+  const words = defectSummaryResponse.summary.split(/\s+/);
+  assert.ok(words.length >= 50 && words.length <= 100, `Word count (${words.length}) must be in 60-100 words range`);
+  assert.strictEqual(defectSummaryResponse.verdict_sentiment, "PROCEED_WITH_CAUTION");
+  assert.ok(defectSummaryResponse.verdict.includes("drift issues"));
+  assert.ok(defectSummaryResponse.verdict_detail.includes("warranty coverage"));
+});
+
+test("Extensive Review Analysis - Mixed trade-offs yields PROCEED WITH CAUTION verdict", () => {
+  const mixedResponse = {
+    status: "success",
+    available: true,
+    provider: "local",
+    summary: "Customer reception across 30 analyzed reviews is divided with mixed opinions (50.0% positive vs 50.0% negative), reflecting varied experiences and noticeable trade-offs. The most widely praised strength centers on dependable display quality, frequently highlighted as a standout advantage. Conversely, critical feedback centers on battery life & charging, which several reviewers cited as an ongoing limitation. It represents reasonable value for budget-focused buyers, but those prioritizing long-term durability should verify warranty coverage.",
+    verdict: "Worthwhile benefits in display quality, but recurring concerns regarding battery life & charging warrant consideration.",
+    verdict_sentiment: "PROCEED_WITH_CAUTION",
+    verdict_detail: "Best suited for buyers comfortable compromising on secondary features.",
+    confidence_score: 65.0,
+    confidence_level: "MODERATE",
+    confidence_explanation: "Moderate confidence based on 30 analyzed reviews. Confidence reflects review sample quality rather than a product guarantee.",
+    total_reviews_analyzed: 30,
+    target_count: 100,
+  };
+
+  assert.strictEqual(mixedResponse.verdict_sentiment, "PROCEED_WITH_CAUTION");
+  assert.ok(mixedResponse.verdict.includes("warrant consideration"));
+});
+
+test("Extensive Review Analysis - Predominantly negative reviews yield AVOID verdict", () => {
+  const avoidResponse = {
+    status: "success",
+    available: true,
+    provider: "local",
+    summary: "Customer feedback across 40 analyzed reviews reflects substantial dissatisfaction (80.0% negative), with widespread complaints concerning performance and reliability. Few distinct advantages were noted beyond initial basic operation. Persistent reports of premature product failure and defective components dominate customer experiences. Given the frequency of recurring defects, this product presents significant purchase risks and is difficult to recommend.",
+    verdict: "Repeated reports of product failure and persistent durability issues present substantial purchase risks.",
+    verdict_sentiment: "AVOID",
+    verdict_detail: "Critical complaints account for 80.0% of analyzed reviews.",
+    confidence_score: 85.0,
+    confidence_level: "HIGH",
+    confidence_explanation: "High confidence based on 40 analyzed reviews. Confidence reflects review sample quality rather than a product guarantee.",
+    total_reviews_analyzed: 40,
+    target_count: 100,
+  };
+
+  assert.strictEqual(avoidResponse.verdict_sentiment, "AVOID");
+  assert.ok(avoidResponse.verdict.includes("substantial purchase risks"));
+  assert.ok(avoidResponse.summary.includes("difficult to recommend"));
+});
+
+test("Extensive Review Analysis - Insufficient review evidence yields INSUFFICIENT EVIDENCE verdict", () => {
+  const sparseResponse = {
+    status: "success",
+    available: true,
+    provider: "local",
+    summary: "A limited sample of 2 visible customer reviews provides directional feedback, but is too few to establish reliable consensus.",
+    verdict: "Only 2 customer reviews available, which is insufficient to determine purchase safety.",
+    verdict_sentiment: "INSUFFICIENT_EVIDENCE",
+    verdict_detail: "A larger sample of verified buyer feedback is required to establish statistical reliability.",
+    confidence_score: 22.0,
+    confidence_level: "INSUFFICIENT",
+    confidence_explanation: "Insufficient confidence: Very small sample of 2 reviews is inadequate to establish reliable consensus. Confidence reflects review sample quality rather than a product guarantee.",
+    total_reviews_analyzed: 2,
+    target_count: 100,
+  };
+
+  assert.strictEqual(sparseResponse.verdict_sentiment, "INSUFFICIENT_EVIDENCE");
+  assert.ok(sparseResponse.verdict.includes("insufficient to determine purchase safety"));
+});

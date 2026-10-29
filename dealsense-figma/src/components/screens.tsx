@@ -42,6 +42,8 @@ export interface Props {
   comparisonLoading?: boolean;
   comparisonError?: string | null;
   onComparePrices?: (customQuery?: string) => void;
+  targetReviewCount?: number;
+  onSetTargetReviewCount?: (target: number) => void;
 }
 
 /* ---------- primitives ---------- */
@@ -495,6 +497,8 @@ function Ready({
   comparisonLoading,
   comparisonError,
   onComparePrices,
+  targetReviewCount = 100,
+  onSetTargetReviewCount,
 }: {
   product: ExtractedProduct | null;
   status: "loading" | "success" | "unsupported" | "error";
@@ -507,6 +511,8 @@ function Ready({
   comparisonLoading?: boolean;
   comparisonError?: string | null;
   onComparePrices?: (customQuery?: string) => void;
+  targetReviewCount?: number;
+  onSetTargetReviewCount?: (target: number) => void;
 }) {
   const [imgSrc, setImgSrc] = useState<string | null>(product?.image || null);
 
@@ -694,13 +700,52 @@ function Ready({
         </Accordion>
       ) : null}
 
+      {/* Review Target Depth Selector (100 reviews default vs 300 deep) */}
+      <div className="rounded-xl border border-border bg-card p-2.5 flex items-center justify-between">
+        <div className="flex flex-col">
+          <div className="flex items-center gap-1.5">
+            <span className="text-[11.5px] font-bold text-foreground">Review Depth Target</span>
+            <span className="rounded bg-primary/10 text-primary border border-primary/20 px-1.5 py-0.5 text-[8.5px] font-mono font-bold">
+              {targetReviewCount === 300 ? "300 Deep" : "100 Standard"}
+            </span>
+          </div>
+          <span className="text-[10px] text-muted-foreground mt-0.5">
+            Multi-page collection depth for sentiment & fake review models
+          </span>
+        </div>
+        <div className="flex items-center gap-1 bg-muted/70 p-0.5 rounded-lg border border-border">
+          <button
+            type="button"
+            onClick={() => onSetTargetReviewCount && onSetTargetReviewCount(100)}
+            className={`px-2.5 py-1 text-[10.5px] font-bold rounded-md transition select-none ${
+              targetReviewCount === 100
+                ? "bg-primary text-primary-foreground shadow-sm"
+                : "text-muted-foreground hover:text-foreground"
+            }`}
+          >
+            100
+          </button>
+          <button
+            type="button"
+            onClick={() => onSetTargetReviewCount && onSetTargetReviewCount(300)}
+            className={`px-2.5 py-1 text-[10.5px] font-bold rounded-md transition select-none ${
+              targetReviewCount === 300
+                ? "bg-primary text-primary-foreground shadow-sm"
+                : "text-muted-foreground hover:text-foreground"
+            }`}
+          >
+            300 Max
+          </button>
+        </div>
+      </div>
+
       {/* Review Detection Status Badge (Requirement 4 & 5) */}
       <div className="rounded-xl border border-border bg-muted/40 px-3.5 py-2.5 flex items-center justify-between">
         <div className="flex items-center gap-2">
           <Star width={14} height={14} className="text-amber-500 fill-amber-500 shrink-0" />
           <span className="text-[12px] font-medium text-foreground">
             {detectedReviewsCount > 0
-              ? `${detectedReviewsCount} reviews collected across ${pagesScanned} page${pagesScanned > 1 ? "s" : ""}`
+              ? `${detectedReviewsCount} reviews in DOM • Target: ${targetReviewCount}`
               : "0 reviews found in active page DOM"}
           </span>
         </div>
@@ -737,7 +782,7 @@ function Ready({
         {detectedReviewsCount > 0 ? (
           <Btn onClick={onAnalyze} className="w-full py-2.5 text-[13px]">
             <Shield width={15} height={15} />
-            Analyze Customer Reviews ({detectedReviewsCount})
+            Collect & Analyze Reviews (Target: {targetReviewCount})
           </Btn>
         ) : (
           <Btn onClick={onRetry} variant="outline" className="w-full py-2.5 text-[12.5px]">
@@ -763,16 +808,19 @@ function Ready({
 
 function Analyzing({
   go,
+  targetReviewCount = 100,
 }: {
   go: (v: View) => void;
+  targetReviewCount?: number;
 }) {
   const [stepIndex, setStepIndex] = useState(0);
   const steps = [
-    "Preprocessing and tokenizing extracted review text...",
+    `Collecting customer reviews across pages (Target: ${targetReviewCount})...`,
+    "Deduplicating reviews and checking rating diversity (1★ to 5★)...",
     "Running Model A (TF-IDF + Logistic Regression Sentiment)...",
     "Running Model B (Kaggle Dataset CG vs OR Classification)...",
     "Extracting functional product & logistics aspects...",
-    "Synthesizing Generative AI summary & recurring themes...",
+    "Synthesizing Local Review Summary & recurring complaints...",
     "Compiling Trust Report and authenticity score...",
   ];
 
@@ -817,6 +865,12 @@ function Result({
   onRetryAnalysis,
   analysisSource = "live_dom",
   isDemoMode = false,
+  comparison,
+  comparisonLoading,
+  comparisonError,
+  onComparePrices,
+  targetReviewCount = 100,
+  onSetTargetReviewCount,
 }: {
   product: ExtractedProduct | null;
   reviewAnalysis?: BatchReviewAnalysisResponse | null;
@@ -830,8 +884,11 @@ function Result({
   comparisonLoading?: boolean;
   comparisonError?: string | null;
   onComparePrices?: (customQuery?: string) => void;
+  targetReviewCount?: number;
+  onSetTargetReviewCount?: (target: number) => void;
 }) {
   const [imgSrc, setImgSrc] = useState<string | null>(product?.image || null);
+  const [visibleReviewsCount, setVisibleReviewsCount] = useState<number>(10);
 
   useEffect(() => {
     setImgSrc(product?.image || null);
@@ -847,10 +904,10 @@ function Result({
   const neuPct = ra?.sentiment_percentages?.neutral ?? 0;
   const negPct = ra?.sentiment_percentages?.negative ?? 0;
 
-  // Trust score color
+  // Trust score and credibility
   const trustScore = ra?.trust_score ?? 100;
   let trustBadgeColor = "text-safe bg-safe-soft border-safe-border";
-  let trustLabel = "HIGH TRUST";
+  let trustLabel = "HIGH CREDIBILITY";
   if (trustScore < 60) {
     trustBadgeColor = "text-destructive bg-destructive/10 border-destructive/30";
     trustLabel = "HIGH SUSPICION";
@@ -860,14 +917,57 @@ function Result({
   }
 
   const pagesScanned = product?.scan_metadata?.pages_scanned || 1;
+  const targetCount = product?.scan_metadata?.target_count || targetReviewCount || 100;
+  const totalAnalyzed = ra?.total_reviews_analyzed ?? 0;
+
+  // Rating counts (1★ through 5★)
+  const ratingCounts: Record<string, number> = { "1": 0, "2": 0, "3": 0, "4": 0, "5": 0 };
+  if (ra?.rating_distribution && Object.keys(ra.rating_distribution).length > 0) {
+    Object.assign(ratingCounts, ra.rating_distribution);
+  } else if (product?.scan_metadata?.rating_distribution) {
+    Object.assign(ratingCounts, product.scan_metadata.rating_distribution);
+  } else if (ra?.analyzed_reviews) {
+    for (const r of ra.analyzed_reviews) {
+      if (r.rating) {
+        const k = String(Math.round(r.rating));
+        if (ratingCounts[k] !== undefined) ratingCounts[k]++;
+      }
+    }
+  }
+
+  // Filter and sort product aspects by mention count descending
+  const sortedAspects = ra?.aspect_analysis?.aspects
+    ? [...ra.aspect_analysis.aspects]
+        .filter((a) => a.category === "product" && a.mention_count > 0)
+        .sort((a, b) => b.mention_count - a.mention_count)
+    : [];
+  const primaryAspects = sortedAspects.slice(0, 3);
+  const remainingAspects = sortedAspects.slice(3);
+  const deliverySummary = ra?.aspect_analysis?.delivery_summary;
+
+  // Themes
+  const positiveThemes = ra?.llm_summary?.common_positive_themes || [];
+  const topPositiveThemes = positiveThemes.slice(0, 3);
+  const morePositiveThemes = positiveThemes.slice(3);
+
+  const complaints = ra?.llm_summary?.recurring_complaints || [];
+  const topComplaints = complaints.slice(0, 3);
+  const moreComplaints = complaints.slice(3);
+
+  const hasAdditionalInsights =
+    morePositiveThemes.length > 0 ||
+    moreComplaints.length > 0 ||
+    (ra?.llm_summary?.pros && ra.llm_summary.pros.length > 0) ||
+    (ra?.llm_summary?.cons && ra.llm_summary.cons.length > 0) ||
+    (ra?.llm_summary?.investigation_patterns && ra.llm_summary.investigation_patterns.length > 0);
 
   return (
-    <div className="sg-fade flex flex-col px-5 py-4 gap-4">
-      {/* Back button and source badge */}
+    <div className="sg-fade flex flex-col px-4 py-3.5 gap-3 max-w-full overflow-hidden text-foreground">
+      {/* Top Navigation */}
       <div className="flex items-center justify-between">
         <button
           onClick={() => go("ready")}
-          className="flex items-center gap-1.5 text-[12px] font-medium text-muted-foreground hover:text-foreground transition"
+          className="flex items-center gap-1.5 text-[11.5px] font-medium text-muted-foreground hover:text-foreground transition"
         >
           <ArrowLeft width={13} height={13} />
           Back to Product
@@ -888,9 +988,9 @@ function Result({
         </div>
       </div>
 
-      {/* Product Summary Header */}
-      <div className="flex items-center gap-3">
-        <div className="h-[48px] w-[48px] shrink-0 overflow-hidden rounded-lg border border-border bg-muted flex items-center justify-center">
+      {/* 1. Compact Product Header */}
+      <div className="rounded-xl border border-border bg-card p-2.5 flex items-start gap-2.5">
+        <div className="h-10 w-10 shrink-0 overflow-hidden rounded-lg border border-border bg-muted flex items-center justify-center">
           {imgSrc ? (
             <img
               src={imgSrc}
@@ -899,104 +999,81 @@ function Result({
               className="h-full w-full object-cover"
             />
           ) : (
-            <Tag width={18} height={18} className="text-muted-foreground/50" />
+            <Tag width={16} height={16} className="text-muted-foreground/50" />
           )}
         </div>
         <div className="min-w-0 flex-1">
-          <div className="text-[13px] font-semibold leading-snug line-clamp-2 text-foreground" title={productName}>
+          <div className="text-[12.5px] font-semibold leading-tight line-clamp-2 text-foreground" title={productName}>
             {productName}
           </div>
-          <div className="mt-0.5 flex items-center gap-2 text-[11px] text-muted-foreground">
-            {asinText ? (
-              <span className="font-mono text-[10px] font-bold text-foreground">
-                ASIN: {asinText}
+          <div className="mt-1 flex flex-wrap items-center gap-x-2 gap-y-0.5 text-[10.5px] text-muted-foreground">
+            {product?.current_site_price ? (
+              <span className="font-bold text-foreground">
+                {INR(product.current_site_price)}
               </span>
             ) : null}
-            {ra?.average_rating ? (
+            {product?.brand && product.brand !== "Unavailable" ? (
               <>
                 <span>•</span>
-                <span className="font-semibold text-amber-500">
-                  ★ {ra.average_rating} / 5
-                </span>
+                <span className="truncate max-w-[100px]" title={product.brand}>{product.brand}</span>
               </>
             ) : null}
-            {ra ? (
+            {product?.model && product.model !== "Unavailable" ? (
               <>
                 <span>•</span>
-                <span>{ra.total_reviews_analyzed} reviews analyzed</span>
+                <span className="truncate max-w-[90px]" title={product.model}>{product.model}</span>
               </>
+            ) : null}
+            {product?.seller && product.seller !== "Unavailable" ? (
+              <>
+                <span>•</span>
+                <span className="truncate max-w-[90px]" title={product.seller}>By {product.seller}</span>
+              </>
+            ) : null}
+            {asinText ? (
+              <span className="rounded bg-muted/80 px-1 py-0.2 font-mono text-[9px] font-medium text-muted-foreground border border-border/60">
+                {asinText}
+              </span>
             ) : null}
           </div>
         </div>
       </div>
 
-      {/* Listing Details: Seller, Brand, Model */}
-      <div className="grid grid-cols-3 gap-1.5 text-[10.5px]">
-        <div className="rounded-lg border border-border bg-muted/40 p-1.5 text-center">
-          <div className="text-[9px] uppercase font-bold text-muted-foreground">Seller</div>
-          <div className="font-semibold text-foreground truncate" title={product?.seller || "Unavailable"}>
-            {product?.seller || "Unavailable"}
-          </div>
-        </div>
-        <div className="rounded-lg border border-border bg-muted/40 p-1.5 text-center">
-          <div className="text-[9px] uppercase font-bold text-muted-foreground">Brand</div>
-          <div className="font-semibold text-foreground truncate" title={product?.brand || "Unavailable"}>
-            {product?.brand || "Unavailable"}
-          </div>
-        </div>
-        <div className="rounded-lg border border-border bg-muted/40 p-1.5 text-center">
-          <div className="text-[9px] uppercase font-bold text-muted-foreground">Model</div>
-          <div className="font-semibold text-foreground truncate" title={product?.model || "Unavailable"}>
-            {product?.model || "Unavailable"}
-          </div>
-        </div>
-      </div>
-
-      {/* Review Scope Banner */}
-      <div className="rounded-lg bg-muted/50 border border-border/60 px-3 py-1.5 text-[10.5px] text-muted-foreground flex items-center justify-between">
-        <span>Sample Scope: {ra ? `${ra.total_reviews_analyzed} reviews analyzed` : "0 analyzed"}</span>
-        <span className="text-[9.5px] font-medium">{pagesScanned} page(s) scanned</span>
-      </div>
-
-      {/* Review Extraction Error / Empty State */}
+      {/* Error state */}
       {reviewError ? (
-        <div className="rounded-xl border border-destructive/30 bg-destructive/10 p-4 flex flex-col gap-2.5">
-          <div className="flex items-start gap-2.5">
-            <Warn width={16} height={16} className="mt-0.5 shrink-0 text-destructive" />
+        <div className="rounded-xl border border-destructive/30 bg-destructive/10 p-3 flex flex-col gap-2">
+          <div className="flex items-start gap-2">
+            <Warn width={15} height={15} className="mt-0.5 shrink-0 text-destructive" />
             <div className="min-w-0 flex-1">
-              <div className="text-[12.5px] font-bold text-destructive">
-                Could Not Retrieve Reviews
-              </div>
-              <div className="text-[11.5px] text-foreground/85 mt-1 leading-relaxed">
-                {reviewError}
-              </div>
+              <div className="text-[12px] font-bold text-destructive">Could Not Retrieve Reviews</div>
+              <div className="text-[11px] text-foreground/85 mt-0.5 leading-relaxed">{reviewError}</div>
             </div>
           </div>
           <div className="flex gap-2 mt-1">
-            <Btn onClick={onRetryAnalysis} variant="outline" className="py-1.5 px-3 text-[12px]">
-              <Refresh width={13} height={13} />
+            <Btn onClick={onRetryAnalysis} variant="outline" className="py-1 px-2.5 text-[11.5px]">
+              <Refresh width={12} height={12} />
               Retry Extraction
             </Btn>
-            <Btn onClick={() => go("ready")} variant="secondary" className="py-1.5 px-3 text-[12px]">
+            <Btn onClick={() => go("ready")} variant="secondary" className="py-1 px-2.5 text-[11.5px]">
               Back to Product
             </Btn>
           </div>
         </div>
       ) : null}
 
-      {/* 1. MODEL A: Overall Sentiment Verdict & Breakdown */}
+      {/* 2. Review Overview */}
       {ra ? (
-        <div className="rounded-xl border border-border bg-card p-3.5 flex flex-col gap-2.5">
+        <div className="rounded-xl border border-border bg-card p-3 flex flex-col gap-2.5">
           <div className="flex items-center justify-between">
             <div className="flex items-center gap-1.5">
               <Tag width={13} height={13} className="text-primary" />
-              <div className="text-[10px] font-bold uppercase tracking-[0.1em] text-foreground">
-                1. ML Sentiment Analysis
-              </div>
+              <span className="text-[10px] font-bold uppercase tracking-[0.1em] text-foreground">
+                Review Overview
+              </span>
             </div>
-            <div className="flex items-center gap-1">
-              <span className="rounded bg-primary/10 text-primary border border-primary/20 px-1.5 py-0.5 text-[8.5px] font-mono font-bold uppercase tracking-wider">
-                Model A (TF-IDF + LR)
+            <div className="flex items-center gap-1.5">
+              <span className="text-[10px] text-muted-foreground">
+                {totalAnalyzed} analyzed <span className="text-[9px] opacity-70">(Target: {targetCount})</span>
               </span>
               <span className={`rounded px-1.5 py-0.5 text-[9px] font-bold uppercase tracking-wider border ${
                 posPct >= 65
@@ -1011,462 +1088,461 @@ function Result({
           </div>
 
           {/* 3-color Segmented Progress Bar */}
-          <div className="w-full h-2.5 rounded-full overflow-hidden flex bg-muted">
-            <div
-              style={{ width: `${posPct}%` }}
-              className="bg-emerald-500 transition-all duration-300"
-              title={`Positive: ${posPct}%`}
-            />
-            <div
-              style={{ width: `${neuPct}%` }}
-              className="bg-slate-400 dark:bg-slate-600 transition-all duration-300"
-              title={`Neutral: ${neuPct}%`}
-            />
-            <div
-              style={{ width: `${negPct}%` }}
-              className="bg-rose-500 transition-all duration-300"
-              title={`Negative: ${negPct}%`}
-            />
+          <div className="w-full h-2 rounded-full overflow-hidden flex bg-muted">
+            <div style={{ width: `${posPct}%` }} className="bg-emerald-500 transition-all duration-300" title={`Positive: ${posPct}%`} />
+            <div style={{ width: `${neuPct}%` }} className="bg-slate-400 dark:bg-slate-600 transition-all duration-300" title={`Neutral: ${neuPct}%`} />
+            <div style={{ width: `${negPct}%` }} className="bg-rose-500 transition-all duration-300" title={`Negative: ${negPct}%`} />
           </div>
 
-          {/* 3 Metrics Cards */}
-          <div className="grid grid-cols-3 gap-2 pt-0.5">
-            <div className="rounded-lg bg-emerald-500/10 border border-emerald-500/20 p-2 text-center">
-              <div className="text-[9.5px] font-bold uppercase tracking-wider text-emerald-600 dark:text-emerald-400">
-                Positive
-              </div>
-              <div className="text-[14px] font-extrabold text-foreground mt-0.5">
-                {posPct}%
-              </div>
-              <div className="text-[9.5px] text-muted-foreground">
-                {ra.sentiment_distribution.positive} reviews
+          {/* Sentiment Stat Triplets */}
+          <div className="grid grid-cols-3 gap-1.5">
+            <div className="rounded-lg bg-emerald-500/10 border border-emerald-500/20 py-1.5 px-2 text-center">
+              <div className="text-[9px] font-bold uppercase text-emerald-600 dark:text-emerald-400">Positive</div>
+              <div className="text-[13px] font-extrabold text-foreground leading-tight mt-0.5">{posPct}%</div>
+              <div className="text-[8.5px] text-muted-foreground">{ra.sentiment_distribution.positive} reviews</div>
+            </div>
+            <div className="rounded-lg bg-muted border border-border py-1.5 px-2 text-center">
+              <div className="text-[9px] font-bold uppercase text-muted-foreground">Neutral</div>
+              <div className="text-[13px] font-extrabold text-foreground leading-tight mt-0.5">{neuPct}%</div>
+              <div className="text-[8.5px] text-muted-foreground">{ra.sentiment_distribution.neutral} reviews</div>
+            </div>
+            <div className="rounded-lg bg-rose-500/10 border border-rose-500/20 py-1.5 px-2 text-center">
+              <div className="text-[9px] font-bold uppercase text-rose-600 dark:text-rose-400">Negative</div>
+              <div className="text-[13px] font-extrabold text-foreground leading-tight mt-0.5">{negPct}%</div>
+              <div className="text-[8.5px] text-muted-foreground">{ra.sentiment_distribution.negative} reviews</div>
+            </div>
+          </div>
+
+          {/* Rating Distribution (1★ to 5★) */}
+          <div className="pt-1 border-t border-border/60">
+            <div className="flex items-center justify-between text-[9.5px] text-muted-foreground mb-1.5">
+              <span className="font-semibold text-foreground flex items-center gap-1">
+                <Star width={11} height={11} className="text-amber-500 fill-amber-500" />
+                Rating Distribution
+              </span>
+              <span>{pagesScanned} page{pagesScanned > 1 ? "s" : ""} scanned</span>
+            </div>
+            <div className="grid grid-cols-5 gap-1">
+              {[5, 4, 3, 2, 1].map((star) => {
+                const count = ratingCounts[String(star)] || 0;
+                const pct = totalAnalyzed > 0 ? Math.round((count / totalAnalyzed) * 100) : 0;
+                return (
+                  <div key={star} className="rounded bg-muted/40 border border-border/50 py-1 px-0.5 text-center flex flex-col items-center">
+                    <span className="text-[9px] font-bold text-amber-500">★{star}</span>
+                    <span className="text-[11.5px] font-extrabold text-foreground my-0.5">{count}</span>
+                    <span className="text-[8px] text-muted-foreground">{pct}%</span>
+                  </div>
+                );
+              })}
+            </div>
+          </div>
+
+          {/* Small Sample Warning (< 15 reviews) */}
+          {totalAnalyzed > 0 && totalAnalyzed < 15 ? (
+            <div className="rounded-lg border border-amber-500/30 bg-amber-500/10 p-2 flex items-start gap-2">
+              <Warn width={14} height={14} className="mt-0.5 shrink-0 text-amber-600 dark:text-amber-400" />
+              <div className="text-[10.5px] text-foreground leading-relaxed">
+                <span className="font-bold text-amber-700 dark:text-amber-400">Small Sample Notice ({totalAnalyzed} reviews): </span>
+                Conclusions are based on available reviews on this listing and carry reduced statistical confidence.
               </div>
             </div>
+          ) : null}
+        </div>
+      ) : null}
 
-            <div className="rounded-lg bg-muted border border-border p-2 text-center">
-              <div className="text-[9.5px] font-bold uppercase tracking-wider text-muted-foreground">
-                Neutral
+      {/* 3. Synthesized Review Summary & Purchase Verdict */}
+      {ra && ra.llm_summary ? (
+        <div className="rounded-xl border border-border bg-card p-3 flex flex-col gap-2.5">
+          {/* Header */}
+          <div className="flex items-center justify-between">
+            <div className="flex items-center gap-1.5">
+              <Sparkle width={13} height={13} className="text-amber-500" />
+              <span className="text-[10px] font-bold uppercase tracking-[0.1em] text-foreground">
+                Synthesized Review Summary
+              </span>
+            </div>
+            <div className="flex items-center gap-1.5">
+              <span className="text-[9.5px] text-muted-foreground font-mono">
+                {totalAnalyzed} of {targetCount} analyzed
+              </span>
+              <span className="rounded px-1.5 py-0.5 text-[8.5px] font-bold uppercase tracking-wider border bg-amber-500/10 text-amber-600 dark:text-amber-400 border-amber-500/30">
+                {ra.llm_summary.provider?.toLowerCase() === "local" ? "LOCAL NLP" : `${ra.llm_summary.provider?.toUpperCase()} AI`}
+              </span>
+            </div>
+          </div>
+
+          {/* Primary Synthesized Paragraph (60-100 words) */}
+          <div className="text-[11px] text-foreground/90 leading-relaxed bg-muted/40 rounded-lg p-2.5 border border-border/40 font-normal">
+            {ra.llm_summary.summary || "No review summary available."}
+          </div>
+
+          {/* Visually Distinct Purchase Verdict Card (Actionable Decision) */}
+          {ra.llm_summary.verdict ? (
+            <div className={`rounded-xl border p-2.5 flex flex-col gap-1.5 ${
+              ra.llm_summary.verdict_sentiment === "PROCEED" || ra.llm_summary.verdict_sentiment === "RECOMMENDED"
+                ? "border-emerald-500/35 bg-emerald-500/5"
+                : ra.llm_summary.verdict_sentiment === "PROCEED_WITH_CAUTION" || ra.llm_summary.verdict_sentiment === "RECOMMENDED_WITH_RESERVATIONS" || ra.llm_summary.verdict_sentiment === "MIXED_TRADE_OFFS"
+                ? "border-amber-500/35 bg-amber-500/5"
+                : ra.llm_summary.verdict_sentiment === "AVOID" || ra.llm_summary.verdict_sentiment === "NOT_RECOMMENDED"
+                ? "border-rose-500/35 bg-rose-500/5"
+                : "border-border bg-muted/30"
+            }`}>
+              <div className="flex items-center justify-between">
+                <span className="text-[9.5px] font-bold uppercase tracking-wider text-muted-foreground">
+                  Purchase Verdict
+                </span>
+                <span className={`rounded px-2 py-0.5 text-[9px] font-bold uppercase tracking-wider border ${
+                  ra.llm_summary.verdict_sentiment === "PROCEED" || ra.llm_summary.verdict_sentiment === "RECOMMENDED"
+                    ? "bg-emerald-500/15 text-emerald-600 dark:text-emerald-400 border-emerald-500/30"
+                    : ra.llm_summary.verdict_sentiment === "PROCEED_WITH_CAUTION" || ra.llm_summary.verdict_sentiment === "RECOMMENDED_WITH_RESERVATIONS" || ra.llm_summary.verdict_sentiment === "MIXED_TRADE_OFFS"
+                    ? "bg-amber-500/15 text-amber-700 dark:text-amber-400 border-amber-500/30"
+                    : ra.llm_summary.verdict_sentiment === "AVOID" || ra.llm_summary.verdict_sentiment === "NOT_RECOMMENDED"
+                    ? "bg-rose-500/15 text-rose-600 dark:text-rose-400 border-rose-500/30"
+                    : "bg-muted text-muted-foreground border-border"
+                }`}>
+                  {ra.llm_summary.verdict_sentiment === "PROCEED" || ra.llm_summary.verdict_sentiment === "RECOMMENDED"
+                    ? "PROCEED"
+                    : ra.llm_summary.verdict_sentiment === "PROCEED_WITH_CAUTION" || ra.llm_summary.verdict_sentiment === "RECOMMENDED_WITH_RESERVATIONS" || ra.llm_summary.verdict_sentiment === "MIXED_TRADE_OFFS"
+                    ? "PROCEED WITH CAUTION"
+                    : ra.llm_summary.verdict_sentiment === "AVOID" || ra.llm_summary.verdict_sentiment === "NOT_RECOMMENDED"
+                    ? "AVOID"
+                    : "INSUFFICIENT EVIDENCE"}
+                </span>
               </div>
-              <div className="text-[14px] font-extrabold text-foreground mt-0.5">
-                {neuPct}%
+
+              {/* 1 Short Plain-English Reason immediately below the prominent verdict label */}
+              <div className="text-[11.5px] font-medium text-foreground leading-snug">
+                {ra.llm_summary.verdict}
               </div>
-              <div className="text-[9.5px] text-muted-foreground">
-                {ra.sentiment_distribution.neutral} reviews
-              </div>
+
+              {/* Optional brief supporting detail */}
+              {ra.llm_summary.verdict_detail ? (
+                <div className="text-[10px] text-muted-foreground leading-tight">
+                  {ra.llm_summary.verdict_detail}
+                </div>
+              ) : null}
+            </div>
+          ) : null}
+
+          {/* Evidence Confidence Indicator */}
+          <div className="rounded-lg bg-muted/40 border border-border/50 p-2 flex flex-col gap-1">
+            <div className="flex items-center justify-between text-[9.5px]">
+              <span className="font-bold uppercase tracking-wider text-muted-foreground">
+                Evidence Confidence
+              </span>
+              <span className={`font-mono font-bold px-1.5 py-0.2 rounded text-[8.5px] border ${
+                (ra.llm_summary.confidence_score ?? 50) >= 75
+                  ? "bg-emerald-500/10 text-emerald-600 dark:text-emerald-400 border-emerald-500/25"
+                  : (ra.llm_summary.confidence_score ?? 50) >= 50
+                  ? "bg-amber-500/10 text-amber-700 dark:text-amber-400 border-amber-500/25"
+                  : "bg-muted text-muted-foreground border-border"
+              }`}>
+                {ra.llm_summary.confidence_level || "MODERATE"} ({ra.llm_summary.confidence_score ?? 50}/100)
+              </span>
             </div>
 
-            <div className="rounded-lg bg-rose-500/10 border border-rose-500/20 p-2 text-center">
-              <div className="text-[9.5px] font-bold uppercase tracking-wider text-rose-600 dark:text-rose-400">
-                Negative
-              </div>
-              <div className="text-[14px] font-extrabold text-foreground mt-0.5">
-                {negPct}%
-              </div>
-              <div className="text-[9.5px] text-muted-foreground">
-                {ra.sentiment_distribution.negative} reviews
-              </div>
+            {/* Confidence Bar */}
+            <div className="w-full h-1.5 rounded-full overflow-hidden bg-muted">
+              <div
+                style={{ width: `${ra.llm_summary.confidence_score ?? 50}%` }}
+                className={`h-full transition-all duration-300 ${
+                  (ra.llm_summary.confidence_score ?? 50) >= 75
+                    ? "bg-emerald-500"
+                    : (ra.llm_summary.confidence_score ?? 50) >= 50
+                    ? "bg-amber-500"
+                    : "bg-muted-foreground"
+                }`}
+              />
+            </div>
+
+            <div className="text-[9px] text-muted-foreground leading-relaxed flex items-start gap-1 pt-0.5">
+              <Info width={11} height={11} className="shrink-0 mt-0.5 text-muted-foreground" />
+              <span>
+                {ra.llm_summary.confidence_explanation || `Confidence reflects the statistical reliability of ${totalAnalyzed} analyzed reviews, not an absolute guarantee of product quality.`}
+              </span>
             </div>
           </div>
         </div>
       ) : null}
 
-      {/* 2. MODEL B: Dataset-Based Review Classification (CG vs OR) */}
-      {ra && ra.fake_review_analysis ? (
-        <div className="rounded-xl border border-border bg-card p-3.5 flex flex-col gap-2.5">
+      {/* 4. Review Authenticity & Credibility (Combined Model B + Heuristics) */}
+      {ra ? (
+        <div className="rounded-xl border border-border bg-card p-3 flex flex-col gap-2.5">
           <div className="flex items-center justify-between">
             <div className="flex items-center gap-1.5">
               <Shield width={13} height={13} className="text-violet-500" />
-              <div className="text-[10px] font-bold uppercase tracking-[0.1em] text-foreground">
-                2. Dataset Review Classification
-              </div>
-            </div>
-            <span className="rounded bg-violet-500/10 text-violet-600 dark:text-violet-400 border border-violet-500/20 px-1.5 py-0.5 text-[8.5px] font-mono font-bold uppercase tracking-wider">
-              Model B (Kaggle CG/OR)
-            </span>
-          </div>
-
-          {/* 2-color Segmented Progress Bar: Original (OR) vs Computer-Generated (CG) */}
-          <div className="w-full h-2.5 rounded-full overflow-hidden flex bg-muted">
-            <div
-              style={{ width: `${ra.fake_review_analysis.or_percentage}%` }}
-              className="bg-sky-500 transition-all duration-300"
-              title={`Original (OR): ${ra.fake_review_analysis.or_percentage}%`}
-            />
-            <div
-              style={{ width: `${ra.fake_review_analysis.cg_percentage}%` }}
-              className="bg-violet-500 transition-all duration-300"
-              title={`Computer-Generated (CG): ${ra.fake_review_analysis.cg_percentage}%`}
-            />
-          </div>
-
-          <div className="grid grid-cols-2 gap-2 pt-0.5">
-            <div className="rounded-lg bg-sky-500/10 border border-sky-500/20 p-2 text-center">
-              <div className="text-[9.5px] font-bold uppercase tracking-wider text-sky-600 dark:text-sky-400">
-                Original (OR)
-              </div>
-              <div className="text-[15px] font-extrabold text-foreground mt-0.5">
-                {ra.fake_review_analysis.or_percentage}%
-              </div>
-              <div className="text-[9.5px] text-muted-foreground">
-                {ra.fake_review_analysis.or_count} reviews
-              </div>
-            </div>
-
-            <div className="rounded-lg bg-violet-500/10 border border-violet-500/20 p-2 text-center">
-              <div className="text-[9.5px] font-bold uppercase tracking-wider text-violet-600 dark:text-violet-400">
-                Computer-Generated (CG)
-              </div>
-              <div className="text-[15px] font-extrabold text-foreground mt-0.5">
-                {ra.fake_review_analysis.cg_percentage}%
-              </div>
-              <div className="text-[9.5px] text-muted-foreground">
-                {ra.fake_review_analysis.cg_count} reviews
-              </div>
-            </div>
-          </div>
-
-          <div className="rounded bg-muted/60 p-2 text-[10px] text-muted-foreground leading-relaxed flex items-start gap-1.5 border border-border/40">
-            <Info width={12} height={12} className="shrink-0 mt-0.5 text-muted-foreground" />
-            <span>{ra.fake_review_analysis.disclaimer}</span>
-          </div>
-        </div>
-      ) : null}
-
-      {/* 3. GENERATIVE AI REVIEW SYNTHESIS (Gemini / OpenAI) */}
-      {ra && ra.llm_summary ? (
-        <div className="rounded-xl border border-border bg-card p-3.5 flex flex-col gap-2.5">
-          <div className="flex items-center justify-between">
-            <div className="flex items-center gap-1.5">
-              <Sparkle width={14} height={14} className="text-amber-500" />
-              <div className="text-[10px] font-bold uppercase tracking-[0.1em] text-foreground">
-                3. Executive Review Synthesis
-              </div>
-              <span className="text-[9.5px] text-muted-foreground font-normal">
-                ({ra.total_reviews_analyzed} review{ra.total_reviews_analyzed === 1 ? "" : "s"} analyzed)
+              <span className="text-[10px] font-bold uppercase tracking-[0.1em] text-foreground">
+                Review Authenticity & Credibility
               </span>
-            </div>
-            <span className={`rounded px-1.5 py-0.5 text-[8.5px] font-bold uppercase tracking-wider border ${
-              ra.llm_summary.available
-                ? "bg-amber-500/10 text-amber-600 dark:text-amber-400 border-amber-500/30"
-                : "bg-muted text-muted-foreground border-border"
-            }`}>
-              {ra.llm_summary.available
-                ? (ra.llm_summary.provider?.toLowerCase() === "local" ? "LOCAL NLP" : `${ra.llm_summary.provider?.toUpperCase()} AI`)
-                : "NO REVIEWS"}
-            </span>
-          </div>
-
-          {ra.llm_summary.available ? (
-            <div className="flex flex-col gap-2.5">
-              {/* Overall Summary */}
-              <div className="text-[11.5px] text-foreground/90 leading-relaxed bg-muted/40 rounded-lg p-2.5 border border-border/40">
-                {ra.llm_summary.summary}
-              </div>
-
-              {/* Positive Themes & Recurring Complaints */}
-              <div className="grid grid-cols-2 gap-2">
-                {/* Positive Themes */}
-                <div className="rounded-lg bg-emerald-500/5 border border-emerald-500/20 p-2 flex flex-col gap-1">
-                  <div className="flex items-center gap-1 text-[10px] font-bold uppercase text-emerald-600 dark:text-emerald-400">
-                    <Check width={11} height={11} />
-                    Positive Themes
-                  </div>
-                  {ra.llm_summary.common_positive_themes && ra.llm_summary.common_positive_themes.length > 0 ? (
-                    <ul className="text-[10px] text-foreground space-y-1 list-disc list-inside">
-                      {ra.llm_summary.common_positive_themes.map((theme, i) => (
-                        <li key={i} className="leading-snug">{theme}</li>
-                      ))}
-                    </ul>
-                  ) : (
-                    <span className="text-[9.5px] text-muted-foreground">No clear themes extracted.</span>
-                  )}
-                </div>
-
-                {/* Recurring Complaints */}
-                <div className="rounded-lg bg-rose-500/5 border border-rose-500/20 p-2 flex flex-col gap-1">
-                  <div className="flex items-center gap-1 text-[10px] font-bold uppercase text-rose-600 dark:text-rose-400">
-                    <Warn width={11} height={11} />
-                    Recurring Complaints
-                  </div>
-                  {ra.llm_summary.recurring_complaints && ra.llm_summary.recurring_complaints.length > 0 ? (
-                    <ul className="text-[10px] text-foreground space-y-1 list-disc list-inside">
-                      {ra.llm_summary.recurring_complaints.map((comp, i) => (
-                        <li key={i} className="leading-snug">{comp}</li>
-                      ))}
-                    </ul>
-                  ) : (
-                    <span className="text-[9.5px] text-muted-foreground">No recurring issues detected.</span>
-                  )}
-                </div>
-              </div>
-
-              {/* LLM Pros & Cons based on Review Evidence */}
-              {((ra.llm_summary.pros && ra.llm_summary.pros.length > 0) || (ra.llm_summary.cons && ra.llm_summary.cons.length > 0)) ? (
-                <div className="grid grid-cols-2 gap-2">
-                  <div className="rounded-lg bg-muted/40 border border-border p-2">
-                    <div className="text-[9.5px] font-bold uppercase text-foreground mb-1">
-                      Pros (Review Evidence)
-                    </div>
-                    <ul className="text-[10px] text-foreground space-y-0.5 list-disc list-inside">
-                      {ra.llm_summary.pros.map((p, i) => (
-                        <li key={i} className="leading-snug">{p}</li>
-                      ))}
-                    </ul>
-                  </div>
-                  <div className="rounded-lg bg-muted/40 border border-border p-2">
-                    <div className="text-[9.5px] font-bold uppercase text-foreground mb-1">
-                      Cons (Review Evidence)
-                    </div>
-                    <ul className="text-[10px] text-foreground space-y-0.5 list-disc list-inside">
-                      {ra.llm_summary.cons.map((c, i) => (
-                        <li key={i} className="leading-snug">{c}</li>
-                      ))}
-                    </ul>
-                  </div>
-                </div>
-              ) : null}
-
-              {/* Patterns Warranting Investigation */}
-              {ra.llm_summary.investigation_patterns && ra.llm_summary.investigation_patterns.length > 0 ? (
-                <div className="rounded-lg bg-amber-500/10 border border-amber-500/30 p-2 flex flex-col gap-1">
-                  <div className="text-[10px] font-bold uppercase text-amber-700 dark:text-amber-400">
-                    Patterns Warranting Investigation
-                  </div>
-                  <ul className="text-[10.5px] text-foreground space-y-1 list-disc list-inside">
-                    {ra.llm_summary.investigation_patterns.map((pat, i) => (
-                      <li key={i} className="leading-snug">{pat}</li>
-                    ))}
-                  </ul>
-                </div>
-              ) : null}
-            </div>
-          ) : (
-            <div className="rounded-lg bg-muted/60 border border-border/60 p-2.5 text-[11px] text-muted-foreground leading-relaxed flex items-start gap-2">
-              <Info width={13} height={13} className="shrink-0 mt-0.5 text-muted-foreground" />
-              <span>
-                {ra.llm_summary.summary || "No customer reviews were extracted or available to summarize. Core ML predictions (Model A & Model B) and heuristic indicators remain operational."}
-              </span>
-            </div>
-          )}
-        </div>
-      ) : null}
-
-      {/* 4. HEURISTIC & RULE-BASED SUSPICIOUS SIGNALS */}
-      {ra ? (
-        <div className="rounded-xl border border-border bg-card p-3.5 flex flex-col gap-2.5">
-          <div className="flex items-center justify-between">
-            <div className="flex items-center gap-1.5">
-              <Shield width={13} height={13} className="text-primary" />
-              <div className="text-[11px] font-bold uppercase tracking-[0.1em] text-foreground">
-                4. Heuristic & Rule-Based Signals
-              </div>
             </div>
             <span className={`rounded px-1.5 py-0.5 text-[9px] font-bold uppercase tracking-wider border ${trustBadgeColor}`}>
-              {trustLabel}
+              {trustLabel} ({trustScore}/100)
             </span>
           </div>
 
-          <div className="flex items-baseline justify-between rounded-lg bg-muted/60 p-2.5 border border-border/60">
-            <div>
-              <div className="text-[10px] uppercase font-semibold text-muted-foreground">Trust Score</div>
-              <div className="text-[20px] font-extrabold text-foreground leading-tight">
-                {trustScore}<span className="text-[12px] font-normal text-muted-foreground"> / 100</span>
+          {/* Plain language overview */}
+          <div className="text-[11px] text-muted-foreground leading-relaxed bg-muted/40 rounded-lg p-2.5 border border-border/40">
+            Credibility evaluates review authenticity independent of customer sentiment. High ratings can still display synthetic or repetitive patterns.
+          </div>
+
+          {/* Combined Credibility Stats */}
+          <div className="grid grid-cols-2 gap-2">
+            {/* Model B: CG vs OR */}
+            {ra.fake_review_analysis ? (
+              <div className="rounded-lg bg-sky-500/10 border border-sky-500/20 p-2 text-center">
+                <div className="text-[9px] font-bold uppercase text-sky-600 dark:text-sky-400">
+                  Model B Classifier
+                </div>
+                <div className="text-[13px] font-extrabold text-foreground mt-0.5">
+                  {ra.fake_review_analysis.or_percentage}% <span className="text-[10px] font-semibold text-muted-foreground">Original</span>
+                </div>
+                <div className="text-[8.5px] text-muted-foreground mt-0.5">
+                  {ra.fake_review_analysis.cg_count} computer-generated ({ra.fake_review_analysis.cg_percentage}%)
+                </div>
               </div>
-            </div>
-            <div className="text-right">
-              <div className="text-[10px] uppercase font-semibold text-muted-foreground">Suspicious Signal Rate</div>
-              <div className="text-[13px] font-bold text-foreground">
-                {ra.suspicious_analysis.suspicion_rate}%
-                <span className="text-[10.5px] font-normal text-muted-foreground ml-1">
-                  ({ra.suspicious_analysis.suspicious_count} of {ra.suspicious_analysis.total_analyzed})
-                </span>
+            ) : null}
+
+            {/* Heuristic Suspicion */}
+            <div className="rounded-lg bg-violet-500/10 border border-violet-500/20 p-2 text-center">
+              <div className="text-[9px] font-bold uppercase text-violet-600 dark:text-violet-400">
+                Pattern Analysis
+              </div>
+              <div className="text-[13px] font-extrabold text-foreground mt-0.5">
+                {ra.suspicious_analysis.suspicious_count} <span className="text-[10px] font-semibold text-muted-foreground">Flagged</span>
+              </div>
+              <div className="text-[8.5px] text-muted-foreground mt-0.5">
+                {ra.suspicious_analysis.suspicion_rate}% of {ra.suspicious_analysis.total_analyzed} reviews
               </div>
             </div>
           </div>
 
-          {/* Anomaly breakdown grid */}
-          <div className="grid grid-cols-2 gap-1.5 text-[11px]">
-            <div className="rounded border border-border bg-background p-1.5 flex justify-between items-center">
-              <span className="text-muted-foreground truncate">Exact duplicates:</span>
-              <span className="font-bold text-foreground ml-1">
-                {ra.suspicious_analysis.flags_breakdown.exact_duplicate || 0}
-              </span>
-            </div>
-            <div className="rounded border border-border bg-background p-1.5 flex justify-between items-center">
-              <span className="text-muted-foreground truncate">Rating mismatch:</span>
-              <span className="font-bold text-foreground ml-1">
-                {ra.suspicious_analysis.flags_breakdown.rating_sentiment_mismatch || 0}
-              </span>
-            </div>
-            <div className="rounded border border-border bg-background p-1.5 flex justify-between items-center">
-              <span className="text-muted-foreground truncate">Promotional text:</span>
-              <span className="font-bold text-foreground ml-1">
-                {ra.suspicious_analysis.flags_breakdown.promotional_keywords || 0}
-              </span>
-            </div>
-            <div className="rounded border border-border bg-background p-1.5 flex justify-between items-center">
-              <span className="text-muted-foreground truncate">Generic boilerplate:</span>
-              <span className="font-bold text-foreground ml-1">
-                {ra.suspicious_analysis.flags_breakdown.short_generic_boilerplate || 0}
-              </span>
-            </div>
-          </div>
-
-          {/* Flagged reviews detail */}
-          {ra.suspicious_analysis.flagged_reviews.length > 0 ? (
-            <Accordion
-              label={`View Flagged Reviews (${ra.suspicious_analysis.flagged_reviews.length})`}
-              badge="HEURISTIC"
-            >
-              <div className="flex flex-col gap-2 max-h-56 overflow-y-auto pr-1">
-                {ra.suspicious_analysis.flagged_reviews.map((f, idx) => (
-                  <div key={idx} className="rounded-lg border border-border bg-muted/40 p-2 text-[11px] flex flex-col gap-1">
-                    <div className="flex items-center justify-between text-muted-foreground">
-                      <span className="font-semibold text-foreground">{f.author || "Reviewer"}</span>
-                      {f.rating ? <span>★ {f.rating} / 5</span> : null}
-                    </div>
-                    <div className="text-foreground/90 italic leading-snug line-clamp-2">
-                      &quot;{f.review_text}&quot;
-                    </div>
-                    <div className="flex flex-wrap gap-1 mt-0.5">
-                      {f.reasons.map((r, rIdx) => (
-                        <span
-                          key={rIdx}
-                          className="rounded bg-rose-500/10 border border-rose-500/25 text-rose-700 dark:text-rose-400 px-1 py-0.5 text-[9px] font-semibold"
-                        >
-                          {r}
-                        </span>
-                      ))}
-                    </div>
-                  </div>
-                ))}
+          {/* Expandable Technical Signals and Flagged Reviews */}
+          <Accordion
+            label="Technical Signals & Flagged Reviews"
+            badge={ra.suspicious_analysis.suspicious_count > 0 ? `${ra.suspicious_analysis.suspicious_count} SIGNALS` : "CLEAN"}
+          >
+            <div className="flex flex-col gap-2 pt-1">
+              <div className="text-[10px] text-muted-foreground leading-relaxed">
+                Statistical anomalies flagged by rule heuristics (repetition, extreme sentiment-rating divergence, boilerplate):
               </div>
-            </Accordion>
-          ) : null}
+              <div className="grid grid-cols-2 gap-1 text-[10.5px]">
+                <div className="rounded border border-border bg-background p-1.5 flex justify-between items-center">
+                  <span className="text-muted-foreground truncate">Exact duplicates:</span>
+                  <span className="font-bold text-foreground ml-1">
+                    {ra.suspicious_analysis.flags_breakdown.exact_duplicate || 0}
+                  </span>
+                </div>
+                <div className="rounded border border-border bg-background p-1.5 flex justify-between items-center">
+                  <span className="text-muted-foreground truncate">Rating mismatch:</span>
+                  <span className="font-bold text-foreground ml-1">
+                    {ra.suspicious_analysis.flags_breakdown.rating_sentiment_mismatch || 0}
+                  </span>
+                </div>
+                <div className="rounded border border-border bg-background p-1.5 flex justify-between items-center">
+                  <span className="text-muted-foreground truncate">Promotional text:</span>
+                  <span className="font-bold text-foreground ml-1">
+                    {ra.suspicious_analysis.flags_breakdown.promotional_keywords || 0}
+                  </span>
+                </div>
+                <div className="rounded border border-border bg-background p-1.5 flex justify-between items-center">
+                  <span className="text-muted-foreground truncate">Generic boilerplate:</span>
+                  <span className="font-bold text-foreground ml-1">
+                    {ra.suspicious_analysis.flags_breakdown.short_generic_boilerplate || 0}
+                  </span>
+                </div>
+              </div>
 
-          {/* Disclaimer badge */}
-          <div className="rounded bg-muted/60 p-2 text-[10px] text-muted-foreground leading-relaxed flex items-start gap-1.5 border border-border/40">
-            <Info width={12} height={12} className="shrink-0 mt-0.5 text-muted-foreground" />
-            <span>{ra.suspicious_analysis.disclaimer}</span>
-          </div>
+              {ra.suspicious_analysis.flagged_reviews.length > 0 ? (
+                <div className="mt-1 flex flex-col gap-1.5 max-h-48 overflow-y-auto pr-1">
+                  <span className="text-[10px] font-bold text-foreground">Flagged Reviews:</span>
+                  {ra.suspicious_analysis.flagged_reviews.map((f, idx) => (
+                    <div key={idx} className="rounded border border-border bg-muted/40 p-2 text-[10.5px] flex flex-col gap-1">
+                      <div className="flex items-center justify-between text-muted-foreground">
+                        <span className="font-semibold text-foreground">{f.author || "Reviewer"}</span>
+                        {f.rating ? <span>★ {f.rating}/5</span> : null}
+                      </div>
+                      <div className="text-foreground/90 italic leading-snug line-clamp-2">
+                        &quot;{f.review_text}&quot;
+                      </div>
+                      <div className="flex flex-wrap gap-1 mt-0.5">
+                        {f.reasons.map((r, rIdx) => (
+                          <span key={rIdx} className="rounded bg-rose-500/10 border border-rose-500/25 text-rose-700 dark:text-rose-400 px-1 py-0.2 text-[8.5px] font-semibold">
+                            {r}
+                          </span>
+                        ))}
+                      </div>
+                    </div>
+                  ))}
+                </div>
+              ) : null}
+
+              <div className="rounded bg-muted/40 p-1.5 text-[9.5px] text-muted-foreground leading-relaxed flex items-start gap-1.5 border border-border/40 mt-0.5">
+                <Info width={11} height={11} className="shrink-0 mt-0.5 text-muted-foreground" />
+                <span>Credibility signals highlight risk indicators and pattern divergence, not absolute proof of fraud.</span>
+              </div>
+            </div>
+          </Accordion>
         </div>
       ) : null}
 
       {/* 5. Product Aspect Analysis */}
-      {ra && ra.aspect_analysis.aspects.length > 0 ? (
-        <div className="flex flex-col gap-2">
-          <div className="text-[10px] font-bold uppercase tracking-[0.1em] text-muted-foreground">
-            Product Aspect Breakdown
+      {primaryAspects.length > 0 ? (
+        <div className="rounded-xl border border-border bg-card p-3 flex flex-col gap-2.5">
+          <div className="flex items-center justify-between">
+            <span className="text-[10px] font-bold uppercase tracking-[0.1em] text-foreground">
+              Key Product Aspects
+            </span>
+            <span className="text-[9.5px] text-muted-foreground font-mono">
+              Sorted by Mentions
+            </span>
           </div>
 
           <div className="flex flex-col gap-2">
-            {ra.aspect_analysis.aspects
-              .filter((a) => a.mention_count > 0 && a.category === "product")
-              .map((asp) => (
-                <div key={asp.aspect_id} className="rounded-xl border border-border bg-card p-3 flex flex-col gap-1.5">
-                  <div className="flex items-center justify-between text-[12px]">
-                    <span className="font-semibold text-foreground">{asp.display_name}</span>
-                    <span className="text-[10px] text-muted-foreground font-medium">
-                      {asp.mention_count} mention{asp.mention_count > 1 ? "s" : ""}
-                    </span>
-                  </div>
-
-                  {/* Aspect Sentiment Bar */}
-                  <div className="w-full h-1.5 rounded-full overflow-hidden flex bg-muted">
-                    <div style={{ width: `${asp.positive_percentage}%` }} className="bg-emerald-500" />
-                    <div style={{ width: `${asp.negative_percentage}%` }} className="bg-rose-500" />
-                  </div>
-
-                  {/* Supporting excerpts */}
-                  {asp.positive_excerpts.length > 0 ? (
-                    <div className="text-[10.5px] text-emerald-700 dark:text-emerald-400 bg-emerald-500/10 rounded px-2 py-1 leading-snug line-clamp-2">
-                      &quot;{asp.positive_excerpts[0]}&quot;
-                    </div>
-                  ) : null}
-                  {asp.negative_excerpts.length > 0 ? (
-                    <div className="text-[10.5px] text-rose-700 dark:text-rose-400 bg-rose-500/10 rounded px-2 py-1 leading-snug line-clamp-2">
-                      &quot;{asp.negative_excerpts[0]}&quot;
-                    </div>
-                  ) : null}
-                </div>
-              ))}
-          </div>
-
-          {/* Delivery & Logistics Experience Card */}
-          {ra.aspect_analysis.delivery_summary.mentions > 0 ? (
-            <div className="rounded-xl border border-border bg-muted/30 p-3 mt-1 flex flex-col gap-1">
-              <div className="flex items-center justify-between text-[12px]">
-                <span className="font-semibold text-foreground">Delivery & Seller Packaging</span>
-                <span className="text-[10px] text-muted-foreground">
-                  {ra.aspect_analysis.delivery_summary.mentions} mentions
-                </span>
-              </div>
-              <div className="text-[11px] text-muted-foreground">
-                Positive sentiment: {ra.aspect_analysis.delivery_summary.positive_percentage}%
-              </div>
-              {ra.aspect_analysis.delivery_summary.sample_quote ? (
-                <div className="text-[10.5px] italic text-foreground/80 bg-background/80 rounded p-1.5 border border-border mt-0.5 line-clamp-2">
-                  &quot;{ra.aspect_analysis.delivery_summary.sample_quote}&quot;
-                </div>
-              ) : null}
-            </div>
-          ) : null}
-        </div>
-      ) : null}
-
-      {/* 6. Analyzed Reviews Viewer */}
-      {ra && ra.analyzed_reviews.length > 0 ? (
-        <Accordion label={`All Analyzed Customer Reviews (${ra.analyzed_reviews.length})`}>
-          <div className="flex flex-col gap-2 max-h-64 overflow-y-auto pr-1">
-            {ra.analyzed_reviews.map((r, i) => (
-              <div key={r.id || i} className="rounded-lg border border-border bg-muted/30 p-2 text-[11px] flex flex-col gap-1">
-                <div className="flex items-center justify-between">
-                  <span className="font-semibold text-foreground truncate pr-2">
-                    {r.author}
-                  </span>
-                  <div className="flex items-center gap-1.5 shrink-0">
-                    {r.rating ? <span className="text-amber-500 font-bold">★ {r.rating}</span> : null}
-                    <span className={`rounded px-1.5 py-0.2 text-[8.5px] font-bold uppercase ${
-                      r.sentiment === "positive"
-                        ? "bg-emerald-500/15 text-emerald-600 dark:text-emerald-400"
-                        : r.sentiment === "negative"
-                        ? "bg-rose-500/15 text-rose-600 dark:text-rose-400"
-                        : "bg-muted text-muted-foreground"
-                    }`}>
-                      {r.sentiment}
-                    </span>
-                    {r.cg_label ? (
-                      <span className={`rounded px-1.5 py-0.2 text-[8.5px] font-mono font-bold uppercase ${
-                        r.cg_label === "CG"
-                          ? "bg-violet-500/15 text-violet-600 dark:text-violet-400 border border-violet-500/30"
-                          : "bg-sky-500/15 text-sky-600 dark:text-sky-400 border border-sky-500/30"
-                      }`}>
-                        {r.cg_label}
-                      </span>
-                    ) : null}
+            {primaryAspects.map((asp) => (
+              <div key={asp.aspect_id} className="rounded-lg border border-border/70 bg-muted/30 p-2.5 flex flex-col gap-1.5">
+                <div className="flex items-center justify-between text-[11.5px]">
+                  <span className="font-semibold text-foreground">{asp.display_name}</span>
+                  <div className="flex items-center gap-1.5 text-[10px] text-muted-foreground">
+                    <span className="text-emerald-600 dark:text-emerald-400 font-semibold">{asp.positive_percentage}% pos</span>
+                    <span>•</span>
+                    <span>{asp.mention_count} mention{asp.mention_count > 1 ? "s" : ""}</span>
                   </div>
                 </div>
-                <div className="text-foreground/90 leading-relaxed text-[10.5px]">
-                  {r.text}
+
+                {/* Aspect Sentiment Bar */}
+                <div className="w-full h-1.5 rounded-full overflow-hidden flex bg-muted">
+                  <div style={{ width: `${asp.positive_percentage}%` }} className="bg-emerald-500" />
+                  <div style={{ width: `${asp.negative_percentage}%` }} className="bg-rose-500" />
                 </div>
-                {r.date ? (
-                  <div className="text-[9.5px] text-muted-foreground">{r.date}</div>
+
+                {/* Sample Excerpt */}
+                {asp.positive_excerpts.length > 0 ? (
+                  <div className="text-[10px] text-emerald-700 dark:text-emerald-400 bg-emerald-500/10 rounded px-1.5 py-0.5 leading-snug line-clamp-1 italic">
+                    &quot;{asp.positive_excerpts[0]}&quot;
+                  </div>
+                ) : asp.negative_excerpts.length > 0 ? (
+                  <div className="text-[10px] text-rose-700 dark:text-rose-400 bg-rose-500/10 rounded px-1.5 py-0.5 leading-snug line-clamp-1 italic">
+                    &quot;{asp.negative_excerpts[0]}&quot;
+                  </div>
                 ) : null}
               </div>
             ))}
           </div>
+
+          {/* Expandable Remaining Aspects and Delivery */}
+          {(remainingAspects.length > 0 || (deliverySummary && deliverySummary.mentions > 0)) ? (
+            <Accordion label={`More Aspects & Delivery (${remainingAspects.length + (deliverySummary && deliverySummary.mentions > 0 ? 1 : 0)})`}>
+              <div className="flex flex-col gap-2 pt-1">
+                {remainingAspects.map((asp) => (
+                  <div key={asp.aspect_id} className="rounded border border-border bg-background p-2 flex flex-col gap-1">
+                    <div className="flex items-center justify-between text-[11px]">
+                      <span className="font-semibold text-foreground">{asp.display_name}</span>
+                      <span className="text-[9.5px] text-muted-foreground">{asp.mention_count} mentions ({asp.positive_percentage}% pos)</span>
+                    </div>
+                    {asp.positive_excerpts.length > 0 ? (
+                      <div className="text-[9.5px] italic text-muted-foreground line-clamp-1">
+                        &quot;{asp.positive_excerpts[0]}&quot;
+                      </div>
+                    ) : null}
+                  </div>
+                ))}
+
+                {deliverySummary && deliverySummary.mentions > 0 ? (
+                  <div className="rounded border border-border bg-muted/40 p-2 flex flex-col gap-1 mt-1">
+                    <div className="flex items-center justify-between text-[11px]">
+                      <span className="font-semibold text-foreground">Delivery & Packaging Experience</span>
+                      <span className="text-[9.5px] text-muted-foreground">{deliverySummary.mentions} mentions</span>
+                    </div>
+                    <div className="text-[10px] text-muted-foreground">
+                      Positive delivery sentiment: <strong className="text-foreground">{deliverySummary.positive_percentage}%</strong>
+                    </div>
+                    {deliverySummary.sample_quote ? (
+                      <div className="text-[9.5px] italic text-muted-foreground bg-background rounded p-1 border border-border/50 line-clamp-2">
+                        &quot;{deliverySummary.sample_quote}&quot;
+                      </div>
+                    ) : null}
+                  </div>
+                ) : null}
+              </div>
+            </Accordion>
+          ) : null}
+        </div>
+      ) : null}
+
+      {/* 6. Individual Customer Reviews (Collapsible & Paginated) */}
+      {ra && ra.analyzed_reviews.length > 0 ? (
+        <Accordion label={`All Customer Reviews (${ra.analyzed_reviews.length})`} badge="RAW">
+          <div className="flex flex-col gap-2 pt-1">
+            <div className="flex flex-col gap-2 max-h-72 overflow-y-auto pr-1">
+              {ra.analyzed_reviews.slice(0, visibleReviewsCount).map((r, i) => (
+                <div key={r.id || i} className="rounded-lg border border-border bg-muted/30 p-2 text-[10.5px] flex flex-col gap-1">
+                  <div className="flex items-center justify-between">
+                    <span className="font-semibold text-foreground truncate pr-1">
+                      {r.author || "Amazon Customer"}
+                    </span>
+                    <div className="flex items-center gap-1 shrink-0">
+                      {r.rating ? <span className="text-amber-500 font-bold">★{r.rating}</span> : null}
+                      <span className={`rounded px-1 py-0.2 text-[8px] font-bold uppercase ${
+                        r.sentiment === "positive"
+                          ? "bg-emerald-500/15 text-emerald-600 dark:text-emerald-400"
+                          : r.sentiment === "negative"
+                          ? "bg-rose-500/15 text-rose-600 dark:text-rose-400"
+                          : "bg-muted text-muted-foreground"
+                      }`}>
+                        {r.sentiment}
+                      </span>
+                      {r.cg_label ? (
+                        <span className={`rounded px-1 py-0.2 text-[8px] font-mono font-bold uppercase ${
+                          r.cg_label === "CG"
+                            ? "bg-violet-500/15 text-violet-600 dark:text-violet-400 border border-violet-500/30"
+                            : "bg-sky-500/15 text-sky-600 dark:text-sky-400 border border-sky-500/30"
+                        }`}>
+                          {r.cg_label}
+                        </span>
+                      ) : null}
+                    </div>
+                  </div>
+                  <div className="text-foreground/90 leading-snug line-clamp-3">
+                    {r.text}
+                  </div>
+                  {r.date ? (
+                    <div className="text-[9px] text-muted-foreground">{r.date}</div>
+                  ) : null}
+                </div>
+              ))}
+            </div>
+
+            {/* Pagination Controls */}
+            {visibleReviewsCount < ra.analyzed_reviews.length ? (
+              <div className="flex gap-2 pt-1">
+                <button
+                  type="button"
+                  onClick={() => setVisibleReviewsCount((prev) => Math.min(prev + 15, ra.analyzed_reviews.length))}
+                  className="flex-1 rounded-lg border border-border bg-card py-1.5 text-[11px] font-semibold text-foreground hover:bg-muted transition"
+                >
+                  Load 15 more ({visibleReviewsCount} of {ra.analyzed_reviews.length})
+                </button>
+                <button
+                  type="button"
+                  onClick={() => setVisibleReviewsCount(ra.analyzed_reviews.length)}
+                  className="rounded-lg border border-border bg-card px-2.5 py-1.5 text-[11px] font-semibold text-muted-foreground hover:text-foreground transition"
+                >
+                  Show all
+                </button>
+              </div>
+            ) : null}
+          </div>
         </Accordion>
       ) : null}
 
-      {/* Debug Metadata Bar */}
-      <div className="rounded-lg border border-border/80 bg-muted/30 p-2 text-[10px] text-muted-foreground font-mono flex items-center justify-between">
-        <span>Source: {analysisSource.toUpperCase()}</span>
-        <span>ASIN: {asinText || "N/A"}</span>
-        <span>Reviews: {ra ? ra.total_reviews_analyzed : 0}</span>
+      {/* 7. Footer Status */}
+      <div className="rounded-lg border border-border/60 bg-muted/20 px-2.5 py-1.5 text-[9.5px] text-muted-foreground font-mono flex items-center justify-between">
+        <span>SOURCE: {analysisSource.toUpperCase()}</span>
+        <span>MODELS: TF-IDF + LR & KAGGLE CG/OR</span>
       </div>
 
-      <div className="pt-1">
-        <Btn onClick={() => go("ready")} variant="outline" className="w-full py-2.5 text-[12.5px]">
+      <div className="pt-0.5">
+        <Btn onClick={() => go("ready")} variant="outline" className="w-full py-2 text-[12px]">
           <ArrowLeft width={13} height={13} />
           Back to Product
         </Btn>
@@ -1699,6 +1775,8 @@ export function ScreenRouter({
   comparisonLoading = false,
   comparisonError = null,
   onComparePrices = () => {},
+  targetReviewCount = 100,
+  onSetTargetReviewCount = () => {},
 }: Props) {
   switch (view) {
     case "ready":
@@ -1715,10 +1793,12 @@ export function ScreenRouter({
           comparisonLoading={comparisonLoading}
           comparisonError={comparisonError}
           onComparePrices={onComparePrices}
+          targetReviewCount={targetReviewCount}
+          onSetTargetReviewCount={onSetTargetReviewCount}
         />
       );
     case "analyzing":
-      return <Analyzing go={go} />;
+      return <Analyzing go={go} targetReviewCount={targetReviewCount} />;
     case "result":
       return (
         <Result
@@ -1730,6 +1810,7 @@ export function ScreenRouter({
           onRetryAnalysis={onAnalyze}
           analysisSource={analysisSource}
           isDemoMode={isDemoMode}
+          targetReviewCount={targetReviewCount}
         />
       );
     case "settings":
@@ -1756,6 +1837,8 @@ export function ScreenRouter({
           comparisonLoading={comparisonLoading}
           comparisonError={comparisonError}
           onComparePrices={onComparePrices}
+          targetReviewCount={targetReviewCount}
+          onSetTargetReviewCount={onSetTargetReviewCount}
         />
       );
   }

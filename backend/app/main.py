@@ -293,6 +293,8 @@ def analyze_batch_reviews(payload: BatchReviewAnalysisRequest) -> BatchReviewAna
             trust_score=100.0,
             data_limitations="No customer reviews found on the active product page or provided via manual input.",
             analyzed_reviews=[],
+            rating_distribution={"1": 0, "2": 0, "3": 0, "4": 0, "5": 0},
+            target_reviews_count=None,
         )
 
     predictor = SentimentPredictor.get_instance()
@@ -327,28 +329,9 @@ def analyze_batch_reviews(payload: BatchReviewAnalysisRequest) -> BatchReviewAna
         delivery_summary=aspect_results["delivery_summary"],
     )
 
-    # 4. Customer Review Synthesis (Gemini / OpenAI / Local Extractive NLP)
-    llm_data = ReviewLLMAnalyzer.analyze_reviews(
-        product_name=payload.product_name,
-        reviews=raw_reviews,
-        sentiment_preds=sentiment_preds,
-        aspects_data=aspect_results,
-    )
-    llm_resp = LLMReviewSummaryResponse(
-        status=llm_data["status"],
-        available=llm_data["available"],
-        provider=llm_data.get("provider"),
-        summary=llm_data.get("summary", ""),
-        recurring_complaints=llm_data.get("recurring_complaints", []),
-        common_positive_themes=llm_data.get("common_positive_themes", []),
-        pros=llm_data.get("pros", []),
-        cons=llm_data.get("cons", []),
-        investigation_patterns=llm_data.get("investigation_patterns", []),
-        error=llm_data.get("error"),
-    )
-
-    # Calculate sentiment distribution
+    # Calculate sentiment distribution and rating breakdown from Model A ground-truth
     sentiment_counts = {"positive": 0, "neutral": 0, "negative": 0}
+    rating_distribution = {"1": 0, "2": 0, "3": 0, "4": 0, "5": 0}
     ratings_sum = 0
     ratings_count = 0
 
@@ -356,14 +339,20 @@ def analyze_batch_reviews(payload: BatchReviewAnalysisRequest) -> BatchReviewAna
         s = sentiment_preds[i].get("sentiment", "neutral")
         sentiment_counts[s] = sentiment_counts.get(s, 0) + 1
         if r.get("rating") is not None:
-            ratings_sum += r["rating"]
-            ratings_count += 1
+            try:
+                r_num = float(r["rating"])
+                ratings_sum += r_num
+                ratings_count += 1
+                star_key = str(int(round(r_num)))
+                if star_key in rating_distribution:
+                    rating_distribution[star_key] += 1
+            except (ValueError, TypeError):
+                pass
 
     total_n = len(raw_reviews)
     sentiment_pcts = {
         k: round(100.0 * cnt / total_n, 1) for k, cnt in sentiment_counts.items()
     }
-
     avg_rating = round(ratings_sum / ratings_count, 1) if ratings_count > 0 else None
 
     # Determine overall sentiment label
@@ -377,6 +366,40 @@ def analyze_batch_reviews(payload: BatchReviewAnalysisRequest) -> BatchReviewAna
         overall_label = "MIXED OPINIONS"
     else:
         overall_label = "MODERATELY POSITIVE"
+
+    # 4. Customer Review Synthesis (Gemini / OpenAI / Local Extractive NLP)
+    llm_data = ReviewLLMAnalyzer.analyze_reviews(
+        product_name=payload.product_name,
+        reviews=raw_reviews,
+        sentiment_preds=sentiment_preds,
+        aspects_data=aspect_results,
+        sentiment_percentages=sentiment_pcts,
+        target_count=payload.target_count or len(raw_reviews),
+        fake_summary=fake_summary,
+        avg_rating=avg_rating,
+    )
+    llm_resp = LLMReviewSummaryResponse(
+        status=llm_data["status"],
+        available=llm_data["available"],
+        provider=llm_data.get("provider"),
+        summary=llm_data.get("summary", ""),
+        verdict=llm_data.get("verdict"),
+        verdict_sentiment=llm_data.get("verdict_sentiment"),
+        verdict_detail=llm_data.get("verdict_detail"),
+        confidence_score=llm_data.get("confidence_score"),
+        confidence_level=llm_data.get("confidence_level"),
+        confidence_explanation=llm_data.get("confidence_explanation"),
+        suitable_for=llm_data.get("suitable_for"),
+        avoid_if=llm_data.get("avoid_if"),
+        total_reviews_analyzed=llm_data.get("total_reviews_analyzed", total_n),
+        target_count=llm_data.get("target_count") or payload.target_count,
+        recurring_complaints=llm_data.get("recurring_complaints", []),
+        common_positive_themes=llm_data.get("common_positive_themes", []),
+        pros=llm_data.get("pros", []),
+        cons=llm_data.get("cons", []),
+        investigation_patterns=llm_data.get("investigation_patterns", []),
+        error=llm_data.get("error"),
+    )
 
 
     # 5. Rule-based Suspicious Pattern Analysis (Heuristic indicators)
@@ -445,6 +468,8 @@ def analyze_batch_reviews(payload: BatchReviewAnalysisRequest) -> BatchReviewAna
         trust_score=trust_score,
         data_limitations=limitations,
         analyzed_reviews=enriched_reviews,
+        rating_distribution=rating_distribution,
+        target_reviews_count=None,
     )
 
 

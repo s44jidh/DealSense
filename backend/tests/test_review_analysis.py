@@ -363,6 +363,129 @@ class TestFastAPIReviewEndpoints(unittest.TestCase):
         self.assertIn("cg_label", data["analyzed_reviews"][0])
         self.assertIn("cg_probability", data["analyzed_reviews"][0])
 
+    def test_analyze_batch_with_100_reviews(self):
+        """Test /api/reviews/analyze-batch with 100 customer reviews and verify rating diversity & performance."""
+        sample_texts = [
+            ("Excellent battery life and very responsive triggers.", 5),
+            ("Good controller for everyday PC gaming, nice ergonomics.", 4),
+            ("Average build quality, buttons feel a bit clicky.", 3),
+            ("D-pad sticks occasionally during combos in fighting games.", 2),
+            ("Defective right joystick started drifting after one week.", 1),
+            ("Great sound clarity, bass is deep and punchy.", 5),
+            ("Solid performance, connects quickly via bluetooth.", 4),
+            ("Decent product for the price point, nothing special.", 3),
+            ("Packaging arrived crushed and item has slight scratches.", 2),
+            ("Completely stopped working after 3 days, waste of money.", 1),
+        ]
+        reviews_100 = []
+        for i in range(100):
+            text_template, rating = sample_texts[i % len(sample_texts)]
+            reviews_100.append({
+                "id": f"rev_{i+1}",
+                "text": f"Review {i+1}: {text_template} Highly relevant customer experience #{i+1}.",
+                "rating": rating,
+                "author": f"Customer_{i+1}",
+                "verified_purchase": (i % 2 == 0),
+            })
+
+        payload = {
+            "product_name": "Ant Esports 100-Review Gaming Controller",
+            "source_retailer": "Amazon.in",
+            "reviews": reviews_100,
+        }
+        res = self.client.post("/api/reviews/analyze-batch", json=payload)
+        self.assertEqual(res.status_code, 200)
+        data = res.json()
+        self.assertEqual(data["status"], "success")
+        self.assertEqual(data["total_reviews_analyzed"], 100)
+        self.assertIn("rating_distribution", data)
+        self.assertEqual(data["rating_distribution"]["5"], 20)
+        self.assertEqual(data["rating_distribution"]["4"], 20)
+        self.assertEqual(data["rating_distribution"]["3"], 20)
+        self.assertEqual(data["rating_distribution"]["2"], 20)
+        self.assertEqual(data["rating_distribution"]["1"], 20)
+
+        # Check sentiment percentages sum to ~100%
+        pcts = data["sentiment_percentages"]
+        total_pct = pcts["positive"] + pcts["neutral"] + pcts["negative"]
+        self.assertAlmostEqual(total_pct, 100.0, delta=1.5)
+
+        # Verify summary reflects large batch
+        self.assertIn("llm_summary", data)
+        self.assertIsNotNone(data["llm_summary"]["summary"])
+        self.assertIn("100", data["llm_summary"]["summary"])
+
+    def test_analyze_batch_with_300_reviews_scaling(self):
+        """Test optional maximum target of 300 reviews without degradation."""
+        sample_texts = [
+            ("Top notch build quality and crisp audio output.", 5),
+            ("Comfortable fit for long gaming sessions, good battery.", 4),
+            ("Acceptable, neither great nor terrible.", 3),
+            ("Build feels flimsy and cable is too short.", 2),
+            ("Horrible device, broke within 24 hours.", 1),
+        ]
+        reviews_300 = []
+        for i in range(300):
+            t, r = sample_texts[i % len(sample_texts)]
+            reviews_300.append({
+                "id": f"rev_{i+1}",
+                "text": f"Feedback #{i+1}: {t} Genuine testing detail #{i+1}.",
+                "rating": r,
+                "author": f"User_{i+1}",
+            })
+
+        payload = {
+            "product_name": "Deep Scale 300 Controller",
+            "source_retailer": "Amazon.in",
+            "reviews": reviews_300,
+        }
+        res = self.client.post("/api/reviews/analyze-batch", json=payload)
+        self.assertEqual(res.status_code, 200)
+        data = res.json()
+        self.assertEqual(data["total_reviews_analyzed"], 300)
+        self.assertGreater(data["trust_score"], 0)
+        self.assertEqual(len(data["analyzed_reviews"]), 300)
+
+    def test_small_sample_warning_in_local_summary(self):
+        """Verify that review samples < 15 include a transparent sample size caveat."""
+        small_reviews = [
+            {"id": "s1", "text": "Very comfortable and clear sound.", "rating": 5, "author": "U1"},
+            {"id": "s2", "text": "Good headphones for online classes.", "rating": 4, "author": "U2"},
+            {"id": "s3", "text": "Ear cups get warm after an hour.", "rating": 2, "author": "U3"},
+        ]
+        payload = {
+            "product_name": "Niche Small Sample Headphones",
+            "source_retailer": "Amazon.in",
+            "reviews": small_reviews,
+        }
+        res = self.client.post("/api/reviews/analyze-batch", json=payload)
+        self.assertEqual(res.status_code, 200)
+        data = res.json()
+        self.assertEqual(data["total_reviews_analyzed"], 3)
+        summary_text = data["llm_summary"]["summary"]
+        self.assertIn("Caution: Sample size of 3 reviews is small", summary_text)
+
+    def test_statistic_consistency_between_summary_and_breakdown(self):
+        """Verify that summary percentage exactly matches the sentiment_percentages breakdown."""
+        reviews = [
+            {"id": "r1", "text": "Outstanding premium build quality and amazing performance.", "rating": 5, "author": "U1"},
+            {"id": "r2", "text": "Crisp audio and very comfortable ear cushions.", "rating": 5, "author": "U2"},
+            {"id": "r3", "text": "Battery lasts for days on a single charge.", "rating": 5, "author": "U3"},
+            {"id": "r4", "text": "Terrible customer support and microphone broke immediately.", "rating": 5, "author": "U4"},
+        ]
+        payload = {
+            "product_name": "Test Consistent Stats",
+            "source_retailer": "Amazon.in",
+            "reviews": reviews,
+        }
+        res = self.client.post("/api/reviews/analyze-batch", json=payload)
+        self.assertEqual(res.status_code, 200)
+        data = res.json()
+        pos_pct = data["sentiment_percentages"]["positive"]
+        summary = data["llm_summary"]["summary"]
+        # The summary consensus string must match the exact pos_pct or neg_pct from sentiment_percentages
+        self.assertIn(f"{pos_pct}%", summary)
+
 
 if __name__ == "__main__":
     unittest.main()

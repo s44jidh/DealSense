@@ -58,7 +58,7 @@ function getJsonLdProduct(doc) {
 // 2. Amazon India Extractor
 // ---------------------------------------------------------------------------
 
-function extractAmazonProduct(customDoc, customUrl) {
+function extractAmazonProduct(customDoc, customUrl, options = {}) {
   const doc = customDoc || (typeof document !== "undefined" ? document : null);
   const href = customUrl || (typeof window !== "undefined" ? window.location.href : "");
   if (!doc) return null;
@@ -293,7 +293,7 @@ function extractAmazonProduct(customDoc, customUrl) {
   const variant = extractAmazonVariant(doc);
 
   // 10. Reviews strictly for this product from the DOM
-  const reviews = extractAmazonReviews(doc);
+  const reviews = (options && options.skipReviews) ? [] : extractAmazonReviews(doc);
 
   // Requirement 7: Debug logging
   console.log("[DealSense Debug Content Script]", {
@@ -992,7 +992,7 @@ function extractAmazonMrp(doc, sellingPrice) {
 // 3. Flipkart Extractor
 // ---------------------------------------------------------------------------
 
-function extractFlipkartProduct(customDoc, customUrl) {
+function extractFlipkartProduct(customDoc, customUrl, options = {}) {
   const doc = customDoc || (typeof document !== "undefined" ? document : null);
   const href = customUrl || (typeof window !== "undefined" ? window.location.href : "");
   if (!doc) return null;
@@ -1126,7 +1126,7 @@ function extractFlipkartProduct(customDoc, customUrl) {
 
   const resolvedBrand = brand || (jsonLd && jsonLd.brand ? (jsonLd.brand.name || jsonLd.brand) : null) || "Unavailable";
   const resolvedModel = (jsonLd && jsonLd.model) || (specifications && (specifications["Model Name"] || specifications["Model Number"])) || "Unavailable";
-  const reviews = extractFlipkartReviews(doc);
+  const reviews = (options && options.skipReviews) ? [] : extractFlipkartReviews(doc);
 
   return {
     source_retailer: "Flipkart",
@@ -1678,7 +1678,7 @@ function extractReviews(customDoc, customUrl) {
   return [];
 }
 
-function extractProduct(customDoc, customUrl) {
+function extractProduct(customDoc, customUrl, options = {}) {
   const href = customUrl || (typeof window !== "undefined" ? window.location.href : "");
   let hostname = "";
   try {
@@ -1689,14 +1689,374 @@ function extractProduct(customDoc, customUrl) {
 
   let prod = null;
   if (hostname.includes("amazon.in")) {
-    prod = extractAmazonProduct(customDoc, customUrl);
+    prod = extractAmazonProduct(customDoc, customUrl, options);
   } else if (hostname.includes("flipkart.com")) {
-    prod = extractFlipkartProduct(customDoc, customUrl);
-  }
-  if (prod) {
-    prod.reviews = extractReviews(customDoc, customUrl);
+    prod = extractFlipkartProduct(customDoc, customUrl, options);
   }
   return prod;
+}
+
+function calculateRatingDistribution(reviews) {
+  const dist = { "1": 0, "2": 0, "3": 0, "4": 0, "5": 0, "unrated": 0 };
+  if (!Array.isArray(reviews)) return dist;
+  for (let i = 0; i < reviews.length; i++) {
+    const r = reviews[i];
+    const star = r && r.rating;
+    if (typeof star === "number" && !isNaN(star) && star >= 1 && star <= 5) {
+      const rounded = String(Math.round(star));
+      if (dist[rounded] !== undefined) {
+        dist[rounded]++;
+      } else {
+        dist["unrated"]++;
+      }
+    } else {
+      dist["unrated"]++;
+    }
+  }
+  return dist;
+}
+
+async function fetchAmazonDedicatedReviews(asin, pageNumber = 1, options = {}) {
+  if (!asin || typeof fetch === "undefined") return [];
+  try {
+    const sortParam = options.sortByRecent ? "&sortBy=recent" : "";
+    const filterByStar = options.filterByStar ? `&filterByStar=${encodeURIComponent(options.filterByStar)}` : "";
+    const base = options.baseUrl || `https://www.amazon.in/product/product-reviews/${encodeURIComponent(asin)}`;
+    const url = `${base}/?reviewerType=all_reviews&pageNumber=${pageNumber}${sortParam}${filterByStar}`;
+    const resp = await fetch(url, {
+      credentials: "include",
+      headers: {
+        "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+      },
+    });
+    if (!resp.ok) return [];
+    const html = await resp.text();
+    if (!html || html.length < 500) return [];
+    if (html.includes("captchacharacters") || html.includes("Robot Check")) return [];
+    if (typeof DOMParser !== "undefined") {
+      const parser = new DOMParser();
+      const doc = parser.parseFromString(html, "text/html");
+      return extractAmazonReviews(doc);
+    }
+  } catch (err) {
+    console.warn("[DealSense] fetchAmazonDedicatedReviews error:", err);
+  }
+  return [];
+}
+
+async function collectMultiPageReviews(options = {}) {
+  const targetCount = options.targetCount || 100;
+  const maxCount = options.maxCount || 300;
+  const diversify = options.diversify !== false;
+
+  const href = typeof window !== "undefined" ? window.location.href : "";
+  let hostname = "";
+  try {
+    hostname = new URL(href).hostname;
+  } catch (e) {
+    if (typeof window !== "undefined") hostname = window.location.hostname || "";
+  }
+
+  const seenIds = new Set();
+  const seenTexts = new Set();
+  const collected = [];
+
+  function addReview(r) {
+    if (!r || !r.text || typeof r.text !== "string") return false;
+    const cleanText = r.text.trim().replace(/\s+/g, " ");
+    if (cleanText.length < 5) return false;
+
+    // Filter out Q&A headers and FAQ prompts
+    const lower = cleanText.toLowerCase();
+    if (/^(q:|question:|have a question\?|frequently asked questions|showing \d+ of)/i.test(lower)) {
+      return false;
+    }
+
+    if (r.id && seenIds.has(r.id)) return false;
+
+    const textKey = lower.slice(0, 100);
+    if (seenTexts.has(textKey)) return false;
+
+    if (r.id) seenIds.add(r.id);
+    seenTexts.add(textKey);
+
+    collected.push({
+      ...r,
+      text: cleanText,
+    });
+    return true;
+  }
+
+  // 1. Initial reviews from current DOM
+  try {
+    const initial = extractReviews();
+    if (Array.isArray(initial)) {
+      for (let i = 0; i < initial.length; i++) {
+        addReview(initial[i]);
+      }
+    }
+  } catch (e) {}
+
+  let pagesScanned = 1;
+  let hasMore = true;
+  let limitationNote = null;
+  let stoppedReason = "target_reached";
+
+  if (typeof fetch === "undefined" || typeof DOMParser === "undefined") {
+    return {
+      success: true,
+      reviews: collected,
+      total_collected: collected.length,
+      pages_scanned: pagesScanned,
+      target_count: targetCount,
+      has_more: false,
+      rating_distribution: calculateRatingDistribution(collected),
+      limitation_note: null,
+      stopped_reason: collected.length >= targetCount ? "target_reached" : "no_fetch_env",
+    };
+  }
+
+  // Amazon India Multi-Page Collection
+  if (hostname.includes("amazon.in")) {
+    let asin = null;
+    try {
+      const prod = extractProduct();
+      if (prod && prod.asin) asin = prod.asin;
+    } catch (e) {}
+    if (!asin && typeof extractAmazonAsin === "function" && typeof document !== "undefined") {
+      asin = extractAmazonAsin(document, href);
+    }
+    if (!asin) {
+      try {
+        const u = new URL(href);
+        const m = u.pathname.match(/\/(?:dp|product|gp\/product|product-reviews)\/([A-Z0-9]{10})(?:[/?#]|$)/i);
+        if (m) asin = m[1].toUpperCase();
+      } catch (e) {}
+    }
+
+    if (!asin) {
+      return {
+        success: true,
+        reviews: collected,
+        total_collected: collected.length,
+        pages_scanned: pagesScanned,
+        target_count: targetCount,
+        has_more: false,
+        rating_distribution: calculateRatingDistribution(collected),
+        limitation_note: "Unable to detect ASIN for review pagination.",
+        stopped_reason: "missing_asin",
+      };
+    }
+
+    let baseReviewsUrl = null;
+    if (typeof document !== "undefined") {
+      const seeAllLink = document.querySelector(
+        'a[data-hook="see-all-reviews-link-foot"], a[data-hook="see-all-reviews-link"], #reviews-medley-footer a'
+      );
+      if (seeAllLink && seeAllLink.getAttribute("href")) {
+        try {
+          const parsed = new URL(seeAllLink.getAttribute("href"), window.location.origin);
+          baseReviewsUrl = `${parsed.origin}${parsed.pathname}`;
+        } catch (e) {}
+      }
+    }
+    if (!baseReviewsUrl) {
+      baseReviewsUrl = `https://www.amazon.in/product/product-reviews/${encodeURIComponent(asin)}`;
+    }
+
+    const maxPages = Math.min(Math.ceil(targetCount / 8) + 2, Math.ceil(maxCount / 8) + 2, 35);
+    let currentPage = href.includes("/product-reviews/") ? 2 : 1;
+
+    // Sweep 1: Recent reviews for natural rating distribution
+    while (collected.length < targetCount && currentPage <= maxPages) {
+      try {
+        await new Promise((res) => setTimeout(res, 120 + Math.random() * 60));
+
+        const pageUrl = `${baseReviewsUrl}/?reviewerType=all_reviews&pageNumber=${currentPage}&sortBy=recent`;
+        const resp = await fetch(pageUrl, {
+          credentials: "include",
+          headers: {
+            "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+          },
+        });
+
+        if (!resp.ok) {
+          if (resp.status === 403 || resp.status === 503) {
+            limitationNote = `Review collection halted: Amazon returned HTTP ${resp.status} (rate limit or bot control).`;
+            hasMore = false;
+            stoppedReason = "access_restricted";
+            break;
+          }
+          break;
+        }
+
+        const html = await resp.text();
+        if (!html || html.length < 500) {
+          hasMore = false;
+          stoppedReason = "empty_response";
+          break;
+        }
+
+        if (
+          html.includes("captchacharacters") ||
+          html.includes("Enter the characters you see below") ||
+          html.includes("Robot Check")
+        ) {
+          limitationNote = "Review collection safely stopped: Amazon anti-bot CAPTCHA challenge encountered.";
+          hasMore = false;
+          stoppedReason = "captcha_detected";
+          break;
+        }
+
+        const parser = new DOMParser();
+        const pageDoc = parser.parseFromString(html, "text/html");
+        const pageRevs = extractAmazonReviews(pageDoc);
+
+        if (pageRevs.length === 0) {
+          hasMore = false;
+          stoppedReason = "no_more_pages";
+          break;
+        }
+
+        let addedThisPage = 0;
+        for (let i = 0; i < pageRevs.length; i++) {
+          if (addReview(pageRevs[i])) {
+            addedThisPage++;
+            if (collected.length >= targetCount) break;
+          }
+        }
+
+        pagesScanned++;
+        currentPage++;
+
+        const nextDisabled = pageDoc.querySelector(
+          "li.a-last.a-disabled, #cm_cr-pagination_bar .a-last.a-disabled, ul.a-pagination li.a-last.a-disabled"
+        );
+        if (nextDisabled || addedThisPage === 0) {
+          hasMore = false;
+          stoppedReason = "no_more_pages";
+          break;
+        }
+      } catch (err) {
+        console.warn("[DealSense] Amazon review pagination error:", err);
+        limitationNote = "Review pagination interrupted by network error.";
+        stoppedReason = "network_error";
+        break;
+      }
+    }
+
+    // Sweep 2: Rating diversity sweep (fetch critical reviews if negative reviews are underrepresented)
+    if (diversify && collected.length < maxCount && stoppedReason !== "captcha_detected" && stoppedReason !== "access_restricted") {
+      const dist = calculateRatingDistribution(collected);
+      const criticalCount = (dist["1"] || 0) + (dist["2"] || 0) + (dist["3"] || 0);
+      if (criticalCount < 3 && collected.length >= 10) {
+        for (let critPage = 1; critPage <= 2 && collected.length < maxCount; critPage++) {
+          try {
+            await new Promise((res) => setTimeout(res, 120 + Math.random() * 60));
+            const critUrl = `${baseReviewsUrl}/?reviewerType=all_reviews&pageNumber=${critPage}&filterByStar=critical`;
+            const resp = await fetch(critUrl, {
+              credentials: "include",
+              headers: {
+                "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+              },
+            });
+            if (!resp.ok) break;
+            const html = await resp.text();
+            if (html.includes("captchacharacters") || html.includes("Robot Check")) break;
+            const parser = new DOMParser();
+            const critDoc = parser.parseFromString(html, "text/html");
+            const critRevs = extractAmazonReviews(critDoc);
+            if (critRevs.length === 0) break;
+            for (let i = 0; i < critRevs.length; i++) {
+              addReview(critRevs[i]);
+              if (collected.length >= maxCount) break;
+            }
+            pagesScanned++;
+            if (critDoc.querySelector("li.a-last.a-disabled")) break;
+          } catch (e) {
+            break;
+          }
+        }
+      }
+    }
+  } else if (hostname.includes("flipkart.com")) {
+    // Flipkart Multi-Page Reviews
+    let baseReviewsUrl = null;
+    if (typeof document !== "undefined") {
+      const allLink = document.querySelector('a[href*="/product-reviews/"]');
+      if (allLink && allLink.getAttribute("href")) {
+        try {
+          baseReviewsUrl = new URL(allLink.getAttribute("href"), window.location.origin).href;
+        } catch (e) {}
+      }
+    }
+    if (!baseReviewsUrl && href.includes("/p/")) {
+      baseReviewsUrl = href.replace("/p/", "/product-reviews/");
+    }
+
+    if (baseReviewsUrl) {
+      const maxPages = Math.min(Math.ceil(targetCount / 8) + 2, 35);
+      let currentPage = 1;
+      while (collected.length < targetCount && currentPage <= maxPages) {
+        try {
+          await new Promise((res) => setTimeout(res, 120 + Math.random() * 60));
+          const u = new URL(baseReviewsUrl);
+          u.searchParams.set("page", String(currentPage));
+          const resp = await fetch(u.href, { credentials: "include" });
+          if (!resp.ok) break;
+          const html = await resp.text();
+          if (!html || html.length < 500) break;
+          const parser = new DOMParser();
+          const pageDoc = parser.parseFromString(html, "text/html");
+          const pageRevs = extractFlipkartReviews(pageDoc);
+          if (pageRevs.length === 0) {
+            hasMore = false;
+            stoppedReason = "no_more_pages";
+            break;
+          }
+          let added = 0;
+          for (let i = 0; i < pageRevs.length; i++) {
+            if (addReview(pageRevs[i])) {
+              added++;
+              if (collected.length >= targetCount) break;
+            }
+          }
+          pagesScanned++;
+          currentPage++;
+          if (added === 0) break;
+        } catch (e) {
+          break;
+        }
+      }
+    }
+  }
+
+  if (collected.length >= targetCount) {
+    stoppedReason = "target_reached";
+  }
+
+  return {
+    success: true,
+    reviews: collected,
+    total_collected: collected.length,
+    pages_scanned: pagesScanned,
+    target_count: targetCount,
+    has_more: hasMore && collected.length >= targetCount,
+    rating_distribution: calculateRatingDistribution(collected),
+    limitation_note: limitationNote,
+    stopped_reason: stoppedReason,
+  };
+}
+
+if (typeof window !== "undefined") {
+  window.calculateRatingDistribution = calculateRatingDistribution;
+  window.collectMultiPageReviews = collectMultiPageReviews;
+  window.fetchAmazonDedicatedReviews = fetchAmazonDedicatedReviews;
+}
+if (typeof globalThis !== "undefined") {
+  globalThis.calculateRatingDistribution = calculateRatingDistribution;
+  globalThis.collectMultiPageReviews = collectMultiPageReviews;
+  globalThis.fetchAmazonDedicatedReviews = fetchAmazonDedicatedReviews;
 }
 
 // Listen for extraction requests from popup
@@ -1722,29 +2082,14 @@ if (typeof chrome !== "undefined" && chrome.runtime && chrome.runtime.onMessage)
       return true;
     }
 
-async function fetchAmazonDedicatedReviews(asin) {
-  if (!asin || typeof fetch === "undefined") return [];
-  try {
-    const url = `https://www.amazon.in/product-reviews/${encodeURIComponent(asin)}/?reviewerType=all_reviews&pageNumber=1`;
-    const resp = await fetch(url, {
-      credentials: "include",
-      headers: {
-        "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
-      },
-    });
-    if (!resp.ok) return [];
-    const html = await resp.text();
-    if (!html || html.length < 500) return [];
-    if (typeof DOMParser !== "undefined") {
-      const parser = new DOMParser();
-      const doc = parser.parseFromString(html, "text/html");
-      return extractAmazonReviews(doc);
+    if (request && request.action === "collectMultiPageReviews") {
+      collectMultiPageReviews(request).then((result) => {
+        sendResponse(result);
+      }).catch((err) => {
+        sendResponse({ success: false, error: String(err) });
+      });
+      return true;
     }
-  } catch (err) {
-    console.warn("[DealSense] fetchAmazonDedicatedReviews error:", err);
-  }
-  return [];
-}
 
     if (request && request.action === "extractProduct") {
       try {
@@ -1759,6 +2104,8 @@ async function fetchAmazonDedicatedReviews(asin) {
                   total_reviews_found: fetchedRevs.length,
                   has_more: true,
                   limitation_note: null,
+                  target_count: 100,
+                  rating_distribution: calculateRatingDistribution(fetchedRevs),
                 };
               }
               sendResponse({ success: true, data: product });
@@ -1766,6 +2113,10 @@ async function fetchAmazonDedicatedReviews(asin) {
               sendResponse({ success: true, data: product });
             });
             return true;
+          }
+          if (product.reviews && product.reviews.length > 0 && product.scan_metadata) {
+            product.scan_metadata.rating_distribution = calculateRatingDistribution(product.reviews);
+            product.scan_metadata.target_count = 100;
           }
           sendResponse({ success: true, data: product });
         } else {
@@ -1795,23 +2146,109 @@ async function fetchAmazonDedicatedReviews(asin) {
 
 // Targeted DOM observation and SPA navigation listener for automatic variant & navigation detection
 let lastSentIdentity = null;
+let lastSentFingerprint = null;
 let debounceTimer = null;
+let isUserScrolling = false;
+let scrollEndTimer = null;
 
 if (typeof window !== "undefined") {
   window.__dealSenseGetLastSentIdentity = () => lastSentIdentity;
-  window.__dealSenseSetLastSentIdentity = (v) => { lastSentIdentity = v; };
+  window.__dealSenseSetLastSentIdentity = (v) => {
+    lastSentIdentity = v;
+    lastSentFingerprint = null;
+  };
+
+  if (typeof window.addEventListener === "function") {
+    try {
+      window.addEventListener(
+        "scroll",
+        () => {
+          isUserScrolling = true;
+          if (scrollEndTimer) clearTimeout(scrollEndTimer);
+          scrollEndTimer = setTimeout(() => {
+            isUserScrolling = false;
+          }, 250);
+        },
+        { passive: true }
+      );
+    } catch (e) {}
+  }
+}
+
+function getQuickProductFingerprint() {
+  try {
+    const doc = typeof document !== "undefined" ? document : null;
+    const href = typeof window !== "undefined" && window.location ? window.location.href : "";
+    if (!doc) return null;
+    if (href.includes("amazon.in")) {
+      const asinMatch = href.match(/\/(?:dp|gp\/product)\/([A-Z0-9]{10})/i);
+      const asin = asinMatch ? asinMatch[1].toUpperCase() : (doc.querySelector && doc.querySelector('input#ASIN, input[name="ASIN"]')?.value ? doc.querySelector('input#ASIN, input[name="ASIN"]').value : "");
+      const priceEl = doc.querySelector ? doc.querySelector("#corePriceDisplay_desktop_feature_div, #corePrice_desktop, .a-price .a-offscreen") : null;
+      const priceText = priceEl ? (priceEl.textContent || "").trim() : "";
+      const varEl = doc.querySelector ? doc.querySelector("#variation_color_name .selection, #variation_size_name .selection, #inline-twister-expanded-dimension-text-color_name") : null;
+      const varText = varEl ? (varEl.textContent || "").trim() : "";
+      return `amz::${asin}::${priceText.slice(0, 30)}::${varText.slice(0, 30)}`;
+    } else if (href.includes("flipkart.com")) {
+      let pid = "";
+      try {
+        const u = new URL(href);
+        pid = u.searchParams.get("pid") || "";
+      } catch (e) {}
+      const priceEl = doc.querySelector ? doc.querySelector('div[class*="Nx9bqj"], div[class*="_30jeq3"], div[class*="v1zwn21n"]') : null;
+      const priceText = priceEl ? (priceEl.textContent || "").trim() : "";
+      return `fk::${pid}::${priceText.slice(0, 30)}`;
+    }
+  } catch (e) {}
+  return null;
+}
+
+function isIgnoredMutationTarget(node) {
+  if (!node) return false;
+  try {
+    const el = node.nodeType === 1 ? node : (node.parentElement || null);
+    if (!el || !el.closest) return false;
+    return Boolean(
+      el.closest(
+        '#reviewsMedley, #customerReviews, #cm-cr-dp-review-list, [data-hook="review"], ' +
+        '.a-carousel, [data-a-carousel], #desktop-dp-sims_purchase-similarities-feature, #similarities_feature_div, #rhf, ' +
+        '#nav-belt, #navbar, #navFooter, footer, header, #skiplink, ' +
+        '#hover-zoom, #main-image-container, .imgTagWrapper, ' +
+        '#ape_Detail_hero-quick-promo_Desktop_placement, [id*="ad-"], [id*="ad_"], iframe, ' +
+        '.a-popover, .a-modal, [role="dialog"], [role="tooltip"], div[class*="carousel"]'
+      )
+    );
+  } catch (e) {
+    return false;
+  }
 }
 
 function checkAndNotifyProductUpdate() {
   if (debounceTimer) {
     clearTimeout(debounceTimer);
   }
+  // While scrolling, postpone extraction until scrolling finishes
+  if (isUserScrolling) {
+    debounceTimer = setTimeout(checkAndNotifyProductUpdate, 350);
+    return;
+  }
   debounceTimer = setTimeout(() => {
     try {
-      const prod = extractProduct();
+      if (isUserScrolling) {
+        debounceTimer = setTimeout(checkAndNotifyProductUpdate, 350);
+        return;
+      }
+
+      const quickFp = getQuickProductFingerprint();
+      if (quickFp && quickFp === lastSentFingerprint && lastSentIdentity !== null) {
+        return;
+      }
+
+      // Fast check without expensive DOM review queries
+      const prod = extractProduct(null, null, { skipReviews: true });
       if (!prod) {
         if (lastSentIdentity !== null) {
           lastSentIdentity = null;
+          lastSentFingerprint = null;
           if (typeof chrome !== "undefined" && chrome.runtime && chrome.runtime.sendMessage) {
             chrome.runtime.sendMessage({ action: "productUnavailable" }, () => {
               if (chrome.runtime?.lastError) {}
@@ -1823,6 +2260,13 @@ function checkAndNotifyProductUpdate() {
       const ident = `${prod.source_retailer}::${prod.retailer_product_id || prod.url}::${prod.product_name}::${prod.current_site_price}::${prod.variant || ""}`;
       if (ident !== lastSentIdentity) {
         lastSentIdentity = ident;
+        lastSentFingerprint = quickFp;
+        try {
+          prod.reviews = extractReviews();
+          if (prod.scan_metadata) {
+            prod.scan_metadata.total_reviews_found = prod.reviews.length;
+          }
+        } catch (e) {}
         if (typeof chrome !== "undefined" && chrome.runtime && chrome.runtime.sendMessage) {
           chrome.runtime.sendMessage({ action: "productUpdated", data: prod }, () => {
             if (chrome.runtime?.lastError) {}
@@ -1833,31 +2277,43 @@ function checkAndNotifyProductUpdate() {
   }, 400);
 }
 
-// Observe target containers on both Amazon and Flipkart
-if (typeof MutationObserver !== "undefined") {
-  const targetContainers = [
-    // Amazon containers
-    document.querySelector("#dp"),
-    document.querySelector("#centerCol"),
-    document.querySelector("#twister"),
-    document.querySelector("#twisterContainer"),
-    document.querySelector("#corePriceDisplay_desktop_feature_div"),
-    document.querySelector("#corePrice_desktop"),
-    document.querySelector("#title_feature_div"),
-    // Flipkart containers
-    document.querySelector("#container"),
-    document.querySelector("div[class*='v1zwn']"),
-    document.body,
-  ].filter(Boolean);
+// Observe target containers on both Amazon and Flipkart with targeted scoping
+if (typeof MutationObserver !== "undefined" && typeof document !== "undefined") {
+  try {
+    const targetContainers = [
+      // Amazon containers: prefer #centerCol or #twister before #dp to avoid observing whole page
+      document.querySelector("#centerCol"),
+      document.querySelector("#twister"),
+      document.querySelector("#twisterContainer"),
+      document.querySelector("#corePriceDisplay_desktop_feature_div"),
+      document.querySelector("#corePrice_desktop"),
+      document.querySelector("#title_feature_div"),
+      document.querySelector("#dp"),
+      // Flipkart containers
+      document.querySelector("div[class*='v1zwn']"),
+      document.querySelector("#container"),
+      document.body,
+    ].filter(Boolean);
 
-  if (targetContainers.length > 0) {
-    const observer = new MutationObserver(() => {
-      checkAndNotifyProductUpdate();
-    });
-    // Limit to the most specific top-level container found
-    const primary = targetContainers[0];
-    observer.observe(primary, { childList: true, subtree: true, characterData: true });
-  }
+    if (targetContainers.length > 0) {
+      const observer = new MutationObserver((mutations) => {
+        if (isUserScrolling) return;
+        if (mutations && mutations.length > 0) {
+          let hasRelevant = false;
+          for (let i = 0; i < mutations.length; i++) {
+            if (!isIgnoredMutationTarget(mutations[i].target)) {
+              hasRelevant = true;
+              break;
+            }
+          }
+          if (!hasRelevant) return;
+        }
+        checkAndNotifyProductUpdate();
+      });
+      const primary = targetContainers[0];
+      observer.observe(primary, { childList: true, subtree: true });
+    }
+  } catch (e) {}
 }
 
 if (typeof window !== "undefined") {
@@ -1872,7 +2328,9 @@ try {
     if (typeof origPush === "function") {
       history.pushState = function () {
         const res = origPush.apply(this, arguments);
-        checkAndNotifyProductUpdate();
+        if (!isUserScrolling) {
+          checkAndNotifyProductUpdate();
+        }
         return res;
       };
     }
@@ -1880,7 +2338,9 @@ try {
     if (typeof origReplace === "function") {
       history.replaceState = function () {
         const res = origReplace.apply(this, arguments);
-        checkAndNotifyProductUpdate();
+        if (!isUserScrolling) {
+          checkAndNotifyProductUpdate();
+        }
         return res;
       };
     }
