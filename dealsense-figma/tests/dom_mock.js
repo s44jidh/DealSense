@@ -1,3 +1,81 @@
+function splitSelectorList(selector) {
+  const parts = [];
+  let current = "";
+  let inQuotes = false;
+  let quoteChar = "";
+  let bracketDepth = 0;
+
+  for (let i = 0; i < selector.length; i++) {
+    const char = selector[i];
+    if (char === '"' || char === "'") {
+      if (!inQuotes) {
+        inQuotes = true;
+        quoteChar = char;
+      } else if (char === quoteChar) {
+        inQuotes = false;
+        quoteChar = "";
+      }
+      current += char;
+    } else if (char === "[" && !inQuotes) {
+      bracketDepth++;
+      current += char;
+    } else if (char === "]" && !inQuotes) {
+      if (bracketDepth > 0) bracketDepth--;
+      current += char;
+    } else if (char === "," && !inQuotes && bracketDepth === 0) {
+      if (current.trim().length > 0) {
+        parts.push(current.trim());
+      }
+      current = "";
+    } else {
+      current += char;
+    }
+  }
+  if (current.trim().length > 0) {
+    parts.push(current.trim());
+  }
+  return parts;
+}
+
+function splitSelectorParts(selector) {
+  const parts = [];
+  let current = "";
+  let inQuotes = false;
+  let quoteChar = "";
+  let bracketDepth = 0;
+
+  for (let i = 0; i < selector.length; i++) {
+    const char = selector[i];
+    if (char === '"' || char === "'") {
+      if (!inQuotes) {
+        inQuotes = true;
+        quoteChar = char;
+      } else if (char === quoteChar) {
+        inQuotes = false;
+        quoteChar = "";
+      }
+      current += char;
+    } else if (char === "[" && !inQuotes) {
+      bracketDepth++;
+      current += char;
+    } else if (char === "]" && !inQuotes) {
+      if (bracketDepth > 0) bracketDepth--;
+      current += char;
+    } else if (/\s/.test(char) && !inQuotes && bracketDepth === 0) {
+      if (current.trim().length > 0) {
+        parts.push(current.trim());
+      }
+      current = "";
+    } else {
+      current += char;
+    }
+  }
+  if (current.trim().length > 0) {
+    parts.push(current.trim());
+  }
+  return parts;
+}
+
 // @ts-check
 /**
  * Lightweight in-memory DOM Node implementation for testing content script extraction.
@@ -59,7 +137,7 @@ export class MockNode {
    * @returns {boolean}
    */
   matches(selector) {
-    const parts = selector.trim().split(",").map((s) => s.trim());
+    const parts = splitSelectorList(selector);
     return parts.some((p) => this._matchesSingle(p));
   }
 
@@ -70,6 +148,16 @@ export class MockNode {
   _matchesSingle(selector) {
     const s = selector.trim();
     if (!s) return false;
+
+    // Pseudo-class: :last-child
+    if (s.endsWith(":last-child")) {
+      if (!this.parentElement) return false;
+      const siblings = this.parentElement.children;
+      if (siblings[siblings.length - 1] !== this) return false;
+      const baseSel = s.slice(0, -":last-child".length);
+      if (!baseSel) return true;
+      return this._matchesSingle(baseSel);
+    }
 
     // Attribute exact: [attr="val"] or [attr='val']
     const attrExact = s.match(/^\[([a-zA-Z0-9_-]+)=["']?([^"'\]]*)["']?\]$/);
@@ -146,7 +234,7 @@ export class MockNode {
    */
   querySelectorAll(selector) {
     if (selector.includes(",")) {
-      const subSels = selector.split(",").map((s) => s.trim());
+      const subSels = splitSelectorList(selector);
       /** @type {MockNode[]} */
       const results = [];
       for (const sub of subSels) {
@@ -157,7 +245,7 @@ export class MockNode {
       return results;
     }
 
-    const parts = selector.trim().split(/\s+/);
+    const parts = splitSelectorParts(selector);
     if (parts.length > 1) {
       let currentSet = [this];
       for (const part of parts) {

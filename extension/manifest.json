@@ -1,4 +1,4 @@
-﻿{
+{
   "manifest_version": 3,
   "name": "DealSense",
   "version": "1.0.0",
@@ -19,6 +19,15 @@
     "48": "icons/icon48.png",
     "128": "icons/icon128.png"
   },
+  "background": {
+    "service_worker": "background.js"
+  },
+  "permissions": [
+    "activeTab",
+    "scripting",
+    "storage",
+    "tabs"
+  ],
   "content_scripts": [
     {
       "matches": [
@@ -31,13 +40,12 @@
       "run_at": "document_idle"
     }
   ],
-  "permissions": [
-    "activeTab"
-  ],
   "host_permissions": [
     "https://www.amazon.com/*",
     "https://www.amazon.in/*",
     "https://www.flipkart.com/*",
-    "https://www.ebay.com/*"
+    "https://www.ebay.com/*",
+    "http://127.0.0.1:8000/*",
+    "http://localhost:8000/*"
   ]
 }

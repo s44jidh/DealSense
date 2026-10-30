@@ -102,6 +102,8 @@ class AspectItem(BaseModel):
     negative_percentage: float
     positive_excerpts: list[str]
     negative_excerpts: list[str]
+    summary: Optional[str] = None
+    sentiment_label: Optional[str] = None
 
 
 class AspectAnalysisResponse(BaseModel):

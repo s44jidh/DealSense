@@ -1172,3 +1172,190 @@ test("Test 27: Generic peripheral extraction captures brand, model, and category
   assert.strictEqual(extracted.model, "SuperPower");
   assert.strictEqual(extracted.category, "Gaming Controller");
 });
+
+// ---------------------------------------------------------------------------
+// Test 28: Tabular buy box rejects promotional "Learn more" and extracts "Sold by" seller
+// ---------------------------------------------------------------------------
+test("Test 28: Tabular buy box extracts actual seller from 'Sold by' and rejects promotional 'Learn more about this item'", () => {
+  const doc = new MockNode("#document");
+  const dp = new MockNode("div", { id: "dp", "data-asin": "B08N5WRWNW" });
+  dp.appendChild(new MockNode("span", { id: "productTitle" }, "Sony WH-1000XM4 Noise Cancelling Headphones"));
+
+  const priceDiv = new MockNode("div", { id: "corePriceDisplay_desktop_feature_div" });
+  const priceSpan = new MockNode("span", { class: "a-price" });
+  priceSpan.appendChild(new MockNode("span", { class: "a-offscreen" }, "₹19,990.00"));
+  priceDiv.appendChild(priceSpan);
+  dp.appendChild(priceDiv);
+
+  // Amazon.in tabular buy box with Ships from, Sold by, and promotional Details / Learn more
+  const tabularBox = new MockNode("div", { id: "tabular-buybox" });
+  const container = new MockNode("div", { class: "tabular-buybox-container" });
+
+  // Row 1: Ships from: Amazon
+  const shipsRow = new MockNode("div", { class: "tabular-buybox-row", "tabular-attribute-name": "Ships from" });
+  const shipsLabel = new MockNode("span", { class: "tabular-buybox-label" }, "Ships from");
+  const shipsVal = new MockNode("span", { class: "tabular-buybox-text" }, "Amazon");
+  shipsRow.appendChild(shipsLabel);
+  shipsRow.appendChild(shipsVal);
+  container.appendChild(shipsRow);
+
+  // Row 2: Sold by: Appario Retail Private Ltd
+  const soldRow = new MockNode("div", { class: "tabular-buybox-row", "tabular-attribute-name": "Sold by" });
+  const soldLabel = new MockNode("span", { class: "tabular-buybox-label" }, "Sold by");
+  const soldVal = new MockNode("span", { class: "tabular-buybox-text" });
+  const sellerAnchor = new MockNode("a", { id: "sellerProfileTriggerId", href: "/gp/help/seller/at-a-glance.html?seller=A2T6N3HS40P50T" }, "Appario Retail Private Ltd");
+  soldVal.appendChild(sellerAnchor);
+  soldRow.appendChild(soldLabel);
+  soldRow.appendChild(soldVal);
+  container.appendChild(soldRow);
+
+  // Row 3: Promotional / Details row (which previously caused "Learn more about t...")
+  const promoRow = new MockNode("div", { class: "tabular-buybox-row", "tabular-attribute-name": "Details" });
+  const promoVal = new MockNode("span", { class: "tabular-buybox-text" });
+  promoVal.appendChild(new MockNode("a", { href: "#" }, "Learn more about this item"));
+  promoRow.appendChild(promoVal);
+  container.appendChild(promoRow);
+
+  tabularBox.appendChild(container);
+  dp.appendChild(tabularBox);
+  doc.appendChild(dp);
+
+  setupGlobalEnvironment(doc, "https://www.amazon.in/dp/B08N5WRWNW");
+  const extracted = extractAmazonProduct();
+  assert.ok(extracted);
+  assert.strictEqual(extracted.seller, "Appario Retail Private Ltd", "Should extract seller and reject promotional link");
+});
+
+// ---------------------------------------------------------------------------
+// Test 29: Distinguishes 'Sold by' from 'Ships from' and never confuses fulfillment with seller
+// ---------------------------------------------------------------------------
+test("Test 29: Amazon seller extraction differentiates 'Sold by' from 'Ships from' and never confuses fulfillment with seller", () => {
+  const doc = new MockNode("#document");
+  const dp = new MockNode("div", { id: "dp", "data-asin": "B09G9BL5CP" });
+  dp.appendChild(new MockNode("span", { id: "productTitle" }, "Apple iPad 10.2-inch (Wi-Fi, 64GB) - Space Grey"));
+
+  const priceDiv = new MockNode("div", { id: "corePriceDisplay_desktop_feature_div" });
+  const priceSpan = new MockNode("span", { class: "a-price" });
+  priceSpan.appendChild(new MockNode("span", { class: "a-offscreen" }, "₹29,900.00"));
+  priceDiv.appendChild(priceSpan);
+  dp.appendChild(priceDiv);
+
+  // Tabular buy box where Ships from is Amazon and Sold by is Cocoblu Retail
+  const tabularBox = new MockNode("div", { id: "tabular-buybox" });
+  const table = new MockNode("table");
+
+  const tr1 = new MockNode("tr", { "tabular-attribute-name": "Ships from" });
+  tr1.appendChild(new MockNode("td", {}, "Ships from"));
+  tr1.appendChild(new MockNode("td", {}, "Amazon Logistics Services"));
+  table.appendChild(tr1);
+
+  const tr2 = new MockNode("tr", { "tabular-attribute-name": "Sold by" });
+  tr2.appendChild(new MockNode("td", {}, "Sold by"));
+  const tdSold = new MockNode("td", {});
+  tdSold.appendChild(new MockNode("span", {}, "Cocoblu Retail"));
+  tr2.appendChild(tdSold);
+  table.appendChild(tr2);
+
+  tabularBox.appendChild(table);
+  dp.appendChild(tabularBox);
+  doc.appendChild(dp);
+
+  setupGlobalEnvironment(doc, "https://www.amazon.in/dp/B09G9BL5CP");
+  const extracted = extractAmazonProduct();
+  assert.ok(extracted);
+  assert.strictEqual(extracted.seller, "Cocoblu Retail");
+  assert.notStrictEqual(extracted.seller, "Amazon Logistics Services");
+});
+
+// ---------------------------------------------------------------------------
+// Test 30: Prioritizes validated JSON-LD offers.seller metadata
+// ---------------------------------------------------------------------------
+test("Test 30: Amazon seller extraction prioritizes validated structured JSON-LD offers.seller metadata", () => {
+  const doc = new MockNode("#document");
+  const dp = new MockNode("div", { id: "dp", "data-asin": "B0BSNQ2KXF" });
+  dp.appendChild(new MockNode("span", { id: "productTitle" }, "Samsung Galaxy S23 Ultra 5G (Phantom Black, 256 GB)"));
+
+  const priceDiv = new MockNode("div", { id: "corePriceDisplay_desktop_feature_div" });
+  const priceSpan = new MockNode("span", { class: "a-price" });
+  priceSpan.appendChild(new MockNode("span", { class: "a-offscreen" }, "₹89,999.00"));
+  priceDiv.appendChild(priceSpan);
+  dp.appendChild(priceDiv);
+
+  const jsonLdScript = new MockNode("script", { type: "application/ld+json" }, JSON.stringify({
+    "@context": "https://schema.org",
+    "@type": "Product",
+    "name": "Samsung Galaxy S23 Ultra 5G",
+    "offers": {
+      "@type": "Offer",
+      "price": 89999,
+      "priceCurrency": "INR",
+      "seller": {
+        "@type": "Organization",
+        "name": "STPL Exclusive Online"
+      }
+    }
+  }));
+  doc.appendChild(jsonLdScript);
+  doc.appendChild(dp);
+
+  setupGlobalEnvironment(doc, "https://www.amazon.in/dp/B0BSNQ2KXF");
+  const extracted = extractAmazonProduct();
+  assert.ok(extracted);
+  assert.strictEqual(extracted.seller, "STPL Exclusive Online");
+});
+
+// ---------------------------------------------------------------------------
+// Test 31: Classic merchant-info regex extraction strips fulfillment & promotional tails
+// ---------------------------------------------------------------------------
+test("Test 31: Merchant-info regex extraction extracts seller and strips 'and Fulfilled by Amazon. Learn more'", () => {
+  const doc = new MockNode("#document");
+  const dp = new MockNode("div", { id: "dp", "data-asin": "B07WHS7K8C" });
+  dp.appendChild(new MockNode("span", { id: "productTitle" }, "Echo Dot (4th Gen) | Smart speaker with Alexa (Black)"));
+
+  const priceDiv = new MockNode("div", { id: "corePriceDisplay_desktop_feature_div" });
+  const priceSpan = new MockNode("span", { class: "a-price" });
+  priceSpan.appendChild(new MockNode("span", { class: "a-offscreen" }, "₹3,499.00"));
+  priceDiv.appendChild(priceSpan);
+  dp.appendChild(priceDiv);
+
+  const merchantDiv = new MockNode(
+    "div",
+    { id: "merchant-info" },
+    "Sold by Appario Retail Private Ltd and Fulfilled by Amazon. Learn more about this item."
+  );
+  dp.appendChild(merchantDiv);
+  doc.appendChild(dp);
+
+  setupGlobalEnvironment(doc, "https://www.amazon.in/dp/B07WHS7K8C");
+  const extracted = extractAmazonProduct();
+  assert.ok(extracted);
+  assert.strictEqual(extracted.seller, "Appario Retail Private Ltd");
+});
+
+// ---------------------------------------------------------------------------
+// Test 32: Missing or purely promotional seller info defaults to 'Seller unavailable'
+// ---------------------------------------------------------------------------
+test("Test 32: Rejects invalid promotional text as seller and safely returns 'Seller unavailable'", () => {
+  const doc = new MockNode("#document");
+  const dp = new MockNode("div", { id: "dp", "data-asin": "B01XYZ9999" });
+  dp.appendChild(new MockNode("span", { id: "productTitle" }, "Mystery Gadget 2026"));
+
+  const priceDiv = new MockNode("div", { id: "corePriceDisplay_desktop_feature_div" });
+  const priceSpan = new MockNode("span", { class: "a-price" });
+  priceSpan.appendChild(new MockNode("span", { class: "a-offscreen" }, "₹999.00"));
+  priceDiv.appendChild(priceSpan);
+  dp.appendChild(priceDiv);
+
+  // Tabular box contains ONLY a promotional link, no real seller
+  const tabularBox = new MockNode("div", { id: "tabular-buybox" });
+  const row = new MockNode("div", { class: "tabular-buybox-row" });
+  row.appendChild(new MockNode("a", { href: "#" }, "Learn more about this item"));
+  tabularBox.appendChild(row);
+  dp.appendChild(tabularBox);
+  doc.appendChild(dp);
+
+  setupGlobalEnvironment(doc, "https://www.amazon.in/dp/B01XYZ9999");
+  const extracted = extractAmazonProduct();
+  assert.ok(extracted);
+  assert.strictEqual(extracted.seller, "Seller unavailable");
+});

@@ -143,6 +143,227 @@ class TestAspectAnalyzer(unittest.TestCase):
         self.assertGreater(len(cons), 0)
         self.assertTrue(len(cons[0]["sample_quote"]) > 0)
 
+    def test_aspect_compact_summaries_and_sentiment_labels(self):
+        """Verify compact evidence-based aspect text summaries and sentiment labels."""
+        # 3 positive mentions of battery life -> Positive sentiment label and clear summary
+        reviews = [
+            {"text": "Battery life lasts for 3 days on a single charge.", "rating": 5},
+            {"text": "Battery life is excellent and charges rapidly.", "rating": 5},
+            {"text": "Very long battery life, ideal for travel.", "rating": 5},
+            # 1 mention of comfort -> Limited Data (< 3 mentions)
+            {"text": "Comfortable to hold in hands.", "rating": 4},
+        ]
+        results = AspectAnalyzer.analyze_aspects(reviews)
+        aspect_dict = {a["aspect_id"]: a for a in results["aspects"]}
+
+        # Battery Life (>= 3 mentions, 100% positive)
+        battery = aspect_dict.get("battery_life")
+        self.assertIsNotNone(battery)
+        self.assertEqual(battery["sentiment_label"], "Positive")
+        self.assertIn("battery life", battery["summary"].lower())
+        self.assertIn("praised", battery["summary"].lower())
+
+        # Comfort (< 3 mentions) -> Limited Data label
+        comfort = aspect_dict.get("comfort")
+        self.assertIsNotNone(comfort)
+        self.assertEqual(comfort["sentiment_label"], "Limited Data")
+        self.assertIn("limited feedback", comfort["summary"].lower())
+
+    def test_aspect_explanation_wording_quality_and_variety(self):
+        """Verify natural, varied, and aspect-specific wording across gaming headset aspects."""
+        # 1. Value for Money — POSITIVE
+        v_exp = AspectAnalyzer.generate_aspect_explanation(
+            aspect_id="value_for_money",
+            display_name="Value for Money",
+            sentiment_label="Positive",
+            pos_excerpts=["Great features for price point"],
+            neg_excerpts=[],
+            mention_count=10,
+        )
+        self.assertEqual(v_exp, "Offers competitive features for its price.")
+
+        # 2. Battery Life & Charging — MIXED
+        b_exp = AspectAnalyzer.generate_aspect_explanation(
+            aspect_id="battery_life",
+            display_name="Battery Life & Charging",
+            sentiment_label="Mixed",
+            pos_excerpts=["Battery lasts all day"],
+            neg_excerpts=["The charging speed is slow as hell"],
+            mention_count=12,
+        )
+        self.assertEqual(b_exp, "Battery performance appears acceptable, but charging speed receives criticism.")
+
+        # 3. Build Quality — MIXED
+        bq_exp = AspectAnalyzer.generate_aspect_explanation(
+            aspect_id="build_quality",
+            display_name="Build Quality",
+            sentiment_label="Mixed",
+            pos_excerpts=["Sturdy plastic and good finish"],
+            neg_excerpts=["The design is bulky and heavy"],
+            mention_count=8,
+        )
+        self.assertEqual(bq_exp, "Most feedback is favourable, although some buyers find the design bulky.")
+
+        # 4. Comfort & Ergonomics — NEGATIVE
+        c_exp = AspectAnalyzer.generate_aspect_explanation(
+            aspect_id="comfort",
+            display_name="Comfort & Ergonomics",
+            sentiment_label="Negative",
+            pos_excerpts=[],
+            neg_excerpts=["This headset feels like wearing a crab on your head"],
+            mention_count=7,
+        )
+        self.assertEqual(c_exp, "Some buyers report discomfort during extended use.")
+
+        # 5. Durability & Longevity — NEGATIVE
+        d_exp = AspectAnalyzer.generate_aspect_explanation(
+            aspect_id="durability",
+            display_name="Durability & Longevity",
+            sentiment_label="Negative",
+            pos_excerpts=[],
+            neg_excerpts=["My unit went bad in two days and broke"],
+            mention_count=6,
+        )
+        self.assertEqual(d_exp, "Reports of early product failure raise concerns about long-term reliability.")
+
+        # Ensure all 5 explanations are distinct
+        explanations = [v_exp, b_exp, bq_exp, c_exp, d_exp]
+        self.assertEqual(len(set(explanations)), 5)
+
+        # Ensure no repetitive templates and all under 15 words
+        for exp in explanations:
+            self.assertFalse(exp.startswith("Generally appreciated, though some buyers note"))
+            self.assertFalse(exp.startswith("Users generally like"))
+            self.assertFalse(exp.startswith("Buyers report"))
+            self.assertLessEqual(len(exp.split()), 15)
+
+    def test_crude_and_informal_language_translation(self):
+        """Verify crude or informal review feedback is translated into professional language."""
+        # Crab on head -> uncomfortable fit
+        c_exp = AspectAnalyzer.generate_aspect_explanation(
+            aspect_id="comfort",
+            display_name="Comfort & Ergonomics",
+            sentiment_label="Negative",
+            pos_excerpts=[],
+            neg_excerpts=["This headset feels like wearing a crab on your head."],
+            mention_count=5,
+        )
+        self.assertEqual(c_exp, "Some buyers report discomfort during extended use.")
+        self.assertNotIn("crab", c_exp.lower())
+
+        # Slow as hell -> charging is slower than some buyers expect
+        s_exp = AspectAnalyzer.generate_aspect_explanation(
+            aspect_id="battery_life",
+            display_name="Battery Life & Charging",
+            sentiment_label="Negative",
+            pos_excerpts=[],
+            neg_excerpts=["The charging speed is slow as hell."],
+            mention_count=5,
+        )
+        self.assertEqual(s_exp, "Charging is slower than some buyers expect.")
+        self.assertNotIn("hell", s_exp.lower())
+
+        # Bulky, but not that bad -> design bulky, although concern appears minor
+        mb_exp = AspectAnalyzer.generate_aspect_explanation(
+            aspect_id="build_quality",
+            display_name="Build Quality",
+            sentiment_label="Mixed",
+            pos_excerpts=["Good plastic"],
+            neg_excerpts=["The design is little bit bulky, but it's not that bad."],
+            mention_count=5,
+        )
+        self.assertEqual(mb_exp, "Some buyers find the design bulky, although the concern appears minor.")
+        self.assertNotIn("not that bad", mb_exp.lower())
+
+    def test_clause_splitting_prevents_evidence_leakage(self):
+        """Verify compound sentences broken on contrastive conjunctions prevent evidence leakage."""
+        reviews = [
+            {
+                "text": "The audio sound quality is extraordinary and crisp, but delivery was delayed and packaging was torn.",
+                "rating": 3
+            },
+            {
+                "text": "Battery life lasts for 20 hours, however comfort causes ear pain after 30 minutes.",
+                "rating": 3
+            }
+        ]
+        results = AspectAnalyzer.analyze_aspects(reviews)
+        aspect_dict = {a["aspect_id"]: a for a in results["aspects"]}
+
+        # sound_quality should be purely positive without delivery complaints
+        sound = aspect_dict.get("sound_quality")
+        self.assertIsNotNone(sound)
+        self.assertGreater(len(sound["positive_excerpts"]), 0)
+        self.assertEqual(len(sound["negative_excerpts"]), 0)
+        self.assertIn("audio", sound["positive_excerpts"][0].lower())
+
+        # delivery_packaging should be purely negative without audio praise
+        delivery = aspect_dict.get("delivery_packaging")
+        self.assertIsNotNone(delivery)
+        self.assertGreater(len(delivery["negative_excerpts"]), 0)
+        self.assertEqual(len(delivery["positive_excerpts"]), 0)
+        self.assertIn("delivery", delivery["negative_excerpts"][0].lower())
+
+        # battery_life should be purely positive without comfort ear pain
+        battery = aspect_dict.get("battery_life")
+        self.assertIsNotNone(battery)
+        self.assertGreater(len(battery["positive_excerpts"]), 0)
+        self.assertEqual(len(battery["negative_excerpts"]), 0)
+        self.assertIn("battery", battery["positive_excerpts"][0].lower())
+
+        # comfort should be purely negative without battery hours praise
+        comfort = aspect_dict.get("comfort")
+        self.assertIsNotNone(comfort)
+        self.assertGreater(len(comfort["negative_excerpts"]), 0)
+        self.assertEqual(len(comfort["positive_excerpts"]), 0)
+        self.assertIn("comfort", comfort["negative_excerpts"][0].lower())
+
+    def test_multi_category_explanations(self):
+        """Verify context-appropriate explanations across furniture, clothing, and appliances."""
+        # Furniture
+        furn_exp = AspectAnalyzer.generate_aspect_explanation(
+            aspect_id="assembly_installation",
+            display_name="Assembly & Installation",
+            sentiment_label="Mixed",
+            pos_excerpts=["Solid wood finish"],
+            neg_excerpts=["Assembly is difficult with many screws"],
+            mention_count=6,
+        )
+        self.assertEqual(furn_exp, "Several buyers praise the finish, but assembly can be difficult.")
+
+        # Clothing
+        cloth_exp = AspectAnalyzer.generate_aspect_explanation(
+            aspect_id="fit_sizing",
+            display_name="Fit & Sizing",
+            sentiment_label="Mixed",
+            pos_excerpts=["Fabric is soft and premium"],
+            neg_excerpts=["Sizing appears inconsistent across sizes"],
+            mention_count=7,
+        )
+        self.assertEqual(cloth_exp, "The fabric receives positive feedback, although sizing appears inconsistent.")
+
+        # Home Appliances
+        app_exp = AspectAnalyzer.generate_aspect_explanation(
+            aspect_id="performance",
+            display_name="Performance & Functionality",
+            sentiment_label="Mixed",
+            pos_excerpts=["Very easy to use"],
+            neg_excerpts=["Motor has excessive operating noise"],
+            mention_count=8,
+        )
+        self.assertEqual(app_exp, "Buyers appreciate its ease of use, but some report excessive operating noise.")
+
+        # Insufficient evidence
+        sparse_exp = AspectAnalyzer.generate_aspect_explanation(
+            aspect_id="water_resistance",
+            display_name="Water Resistance",
+            sentiment_label="Positive",
+            pos_excerpts=["Splashes ok"],
+            neg_excerpts=[],
+            mention_count=1,
+        )
+        self.assertEqual(sparse_exp, "Insufficient review evidence.")
+
 
 class TestSuspiciousPatternAnalyzer(unittest.TestCase):
     def test_exact_duplicate_detection(self):
@@ -410,10 +631,12 @@ class TestFastAPIReviewEndpoints(unittest.TestCase):
         total_pct = pcts["positive"] + pcts["neutral"] + pcts["negative"]
         self.assertAlmostEqual(total_pct, 100.0, delta=1.5)
 
-        # Verify summary reflects large batch
+        # Verify summary reflects large batch in natural opinion style without percentage symbols
         self.assertIn("llm_summary", data)
         self.assertIsNotNone(data["llm_summary"]["summary"])
-        self.assertIn("100", data["llm_summary"]["summary"])
+        summary_text = data["llm_summary"]["summary"]
+        self.assertNotIn("%", summary_text, "Summary must not contain percentage symbols")
+        self.assertIn("like", summary_text.lower())
 
     def test_analyze_batch_with_300_reviews_scaling(self):
         """Test optional maximum target of 300 reviews without degradation."""
@@ -446,8 +669,8 @@ class TestFastAPIReviewEndpoints(unittest.TestCase):
         self.assertGreater(data["trust_score"], 0)
         self.assertEqual(len(data["analyzed_reviews"]), 300)
 
-    def test_small_sample_warning_in_local_summary(self):
-        """Verify that review samples < 15 include a transparent sample size caveat."""
+    def test_small_sample_plain_summary(self):
+        """Verify that small review samples produce short, natural opinion summaries without statistical percentages."""
         small_reviews = [
             {"id": "s1", "text": "Very comfortable and clear sound.", "rating": 5, "author": "U1"},
             {"id": "s2", "text": "Good headphones for online classes.", "rating": 4, "author": "U2"},
@@ -463,10 +686,12 @@ class TestFastAPIReviewEndpoints(unittest.TestCase):
         data = res.json()
         self.assertEqual(data["total_reviews_analyzed"], 3)
         summary_text = data["llm_summary"]["summary"]
-        self.assertIn("Caution: Sample size of 3 reviews is small", summary_text)
+        self.assertNotIn("%", summary_text, "Summary must not contain percentages")
+        self.assertNotIn("3 reviews", summary_text, "Summary must not contain review counts")
+        self.assertIn("like", summary_text.lower())
 
-    def test_statistic_consistency_between_summary_and_breakdown(self):
-        """Verify that summary percentage exactly matches the sentiment_percentages breakdown."""
+    def test_opinion_focused_summary_without_percentages(self):
+        """Verify that review summary is short, natural, and opinion-focused without statistical percentages."""
         reviews = [
             {"id": "r1", "text": "Outstanding premium build quality and amazing performance.", "rating": 5, "author": "U1"},
             {"id": "r2", "text": "Crisp audio and very comfortable ear cushions.", "rating": 5, "author": "U2"},
@@ -481,10 +706,10 @@ class TestFastAPIReviewEndpoints(unittest.TestCase):
         res = self.client.post("/api/reviews/analyze-batch", json=payload)
         self.assertEqual(res.status_code, 200)
         data = res.json()
-        pos_pct = data["sentiment_percentages"]["positive"]
         summary = data["llm_summary"]["summary"]
-        # The summary consensus string must match the exact pos_pct or neg_pct from sentiment_percentages
-        self.assertIn(f"{pos_pct}%", summary)
+        self.assertNotIn("%", summary, "Summary must not contain percentage symbols")
+        self.assertNotIn("4 reviews", summary, "Summary must not contain review counts")
+        self.assertTrue(len(summary.split()) < 75, "Summary must be short and concise")
 
 
 if __name__ == "__main__":

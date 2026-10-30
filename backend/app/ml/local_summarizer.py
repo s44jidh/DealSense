@@ -360,28 +360,23 @@ class LocalReviewSummarizer:
         best_pos = cls._truncate_excerpt(pos_sents[0]["text"]) if pos_sents else None
         best_neg = cls._truncate_excerpt(neg_sents[0]["text"]) if neg_sents else None
 
-        if total_reviews == 1:
-            base_caveat = "Analysis based on only 1 visible customer review, which is insufficient to establish statistical consensus."
-            verdict = "Only 1 customer review available, which is insufficient to determine purchase safety."
-            conf_score = 15.0
-            conf_level = "INSUFFICIENT"
-        else:
-            base_caveat = f"Analysis based on only {total_reviews} visible customer reviews, which is too few to establish reliable consensus."
-            verdict = f"Only {total_reviews} customer reviews available, which is insufficient to determine purchase safety."
-            conf_score = 22.0
-            conf_level = "INSUFFICIENT"
+        verdict_sentiment = "INSUFFICIENT_EVIDENCE"
+        verdict = "There is not enough customer feedback to determine purchase safety."
+        verdict_detail = "Only a few preliminary reviews are available so far."
+        conf_score = 20.0
+        conf_level = "INSUFFICIENT"
 
         if best_pos and best_neg:
-            summary = f"{base_caveat} Customer feedback highlights \"{best_pos}\", but also reports \"{best_neg}\"."
+            summary = f"There is very little customer feedback available yet, which is too few to establish reliable consensus. An early reviewer liked \"{best_pos}\", but another noted \"{best_neg}\". Overall, there is not enough customer feedback to form a reliable opinion."
         elif best_pos:
-            summary = f"{base_caveat} Customer feedback highlights: \"{best_pos}\"."
+            summary = f"There is very little customer feedback available yet, which is insufficient to establish statistical consensus. An early buyer mentioned that \"{best_pos}\", but there is not enough customer feedback to form a reliable opinion."
         elif best_neg:
-            summary = f"{base_caveat} Customer feedback reports: \"{best_neg}\"."
+            summary = f"There is very little customer feedback available yet, which is insufficient to establish statistical consensus. An early buyer reported \"{best_neg}\", but there is not enough customer feedback to form a reliable opinion."
         elif extracted_sentences:
             best_any = cls._truncate_excerpt(extracted_sentences[0]["text"])
-            summary = f"{base_caveat} Customer feedback notes: \"{best_any}\"."
+            summary = f"There is very little customer feedback available yet, which is insufficient to establish statistical consensus, with a buyer noting \"{best_any}\". There is not enough customer feedback to form a reliable opinion."
         else:
-            summary = f"{base_caveat} No clear descriptive sentences could be extracted."
+            summary = "There is not enough customer feedback to form a reliable opinion on this product yet."
 
         pros = [f"Observed positive feedback: \"{best_pos}\""] if best_pos else []
         cons = [f"Reported issue: \"{best_neg}\""] if best_neg else []
@@ -389,7 +384,7 @@ class LocalReviewSummarizer:
         complaints = [f"Reported issue: \"{best_neg}\""] if best_neg else []
 
         patterns = [
-            f"Small sample size ({total_reviews} review{'s' if total_reviews > 1 else ''} extracted) — statistical reliability is limited."
+            f"Small review sample ({total_reviews} reviews) — statistical reliability is limited."
         ]
         if duplicate_count > 0:
             patterns.append(f"Identified {duplicate_count} duplicated review submission(s).")
@@ -506,73 +501,82 @@ class LocalReviewSummarizer:
             verdict_sentiment = "AVOID"
             weakness = neg_aspect_names[0].lower() if neg_aspect_names else "overall reliability"
             verdict = f"Repeated reports of product failure and persistent {weakness} issues present substantial purchase risks."
-            verdict_detail = f"Critical complaints account for {neg_pct}% of analyzed reviews."
+            verdict_detail = "Recurring defect reports and durability complaints present substantial risk."
         elif duplicate_count > (total_reviews * 0.25) or (fake_summary and fake_summary.get("cg_percentage", 0) > 40):
             # Contradictory or suspicious patterns
             verdict_sentiment = "PROCEED_WITH_CAUTION"
             verdict = "Reviews lean positive, but elevated manipulation patterns or repeated text warrant caution."
-            verdict_detail = f"Identified {duplicate_count} duplicated submissions in the collected review sample."
+            verdict_detail = "Multiple repeated submissions identified in the collected feedback."
         elif pos_pct >= 70.0:
             # Positive reviews without major recurring problems
             verdict_sentiment = "PROCEED"
             verdict = "Reviews are generally positive, with consistent satisfaction and no major recurring issues identified."
-            verdict_detail = f"Broad buyer consensus across {total_reviews} analyzed reviews supports buying."
+            verdict_detail = "Broad buyer consensus supports buying."
         else:
             verdict_sentiment = "PROCEED_WITH_CAUTION"
             verdict = "Reviews show moderate customer satisfaction alongside noticeable product limitations."
             verdict_detail = "Carefully assess individual feature priorities against reported limitations."
 
         # ---------------------------------------------------------------------
-        # 2. Concise Synthesized Review Summary (Target 60-100 Words Maximum)
-        # Covers: 1) Overall customer experience, 2) Strongest recurring benefit,
-        #         3) Most significant recurring drawback/defect, 4) Concluding worthwhile assessment.
-        # Sounds like a neutral, concise product analyst without stringing customer quotations.
+        # 2. Simplified, Natural Opinion-Focused Review Summary
+        # A few plain sentences describing:
+        # 1) What customers generally like,
+        # 2) What customers dislike or find disappointing,
+        # 3) Whether the product seems worth considering.
+        # Zero percentages, zero numerical scores, zero review counts, zero confidence scores.
         # ---------------------------------------------------------------------
-        # Sentence 1: Overall customer experience
-        if pos_pct >= 85.0:
-            exp_str = f"Customer consensus across {total_reviews} analyzed reviews is overwhelmingly positive ({pos_pct}% positive), reflecting broad buyer satisfaction with everyday performance."
-        elif pos_pct >= 70.0:
-            exp_str = f"Customer reception across {total_reviews} analyzed reviews is largely favorable ({pos_pct}% positive), with buyers consistently reporting a positive everyday experience."
-        elif abs(pos_pct - neg_pct) <= 25.0 and pos_pct >= 35.0:
-            exp_str = f"Customer reception across {total_reviews} analyzed reviews is divided with mixed opinions ({pos_pct}% positive vs {neg_pct}% negative), reflecting varied experiences and noticeable trade-offs."
-        elif neg_pct >= 45.0 or pos_pct < 35.0:
-            exp_str = f"Customer feedback across {total_reviews} analyzed reviews reflects substantial dissatisfaction ({neg_pct}% negative), with widespread complaints concerning performance and reliability."
+        # Positive highlights
+        if len(pos_aspect_names) >= 2:
+            likes_part = f"{pos_aspect_names[0].lower()} and {pos_aspect_names[1].lower()}"
+        elif len(pos_aspect_names) == 1:
+            likes_part = pos_aspect_names[0].lower()
         else:
-            exp_str = f"Customer reception across {total_reviews} analyzed reviews is divided with mixed opinions ({pos_pct}% positive vs {neg_pct}% negative), reflecting varied experiences and noticeable trade-offs."
+            likes_part = "general build quality and value"
 
-        # Sentence 2: Strongest recurring benefit
-        if pos_aspect_names:
-            benefit_str = f"The most widely praised strength centers on dependable {pos_aspect_names[0].lower()}, frequently highlighted as a standout advantage."
-        elif pos_pct >= 50.0:
-            benefit_str = "Purchasers consistently appreciate its accessible price point and solid functional utility for routine tasks."
-        else:
-            benefit_str = "No strong positive commendations or distinctive advantages were identified in the analyzed customer feedback."
-
-        # Sentence 3: Most significant recurring drawback / defect
-        if defect_sents:
-            drawback_str = f"However, recurring reports of premature {defect_cue} issues raise meaningful durability concerns that prospective buyers should weigh."
+        # Negative concerns
+        if defect_sents and defect_cue:
+            dislikes_part = f"issues with {defect_cue}"
         elif neg_aspect_names:
-            drawback_str = f"Conversely, critical feedback centers on {neg_aspect_names[0].lower()}, which several reviewers cited as an ongoing limitation."
-        elif neg_pct < 10.0:
-            drawback_str = "Notably, no recurring critical defects or systemic failure patterns were reported across the analyzed reviews."
+            dislikes_part = f"the {neg_aspect_names[0].lower()}"
+        elif neg_pct >= 40.0:
+            dislikes_part = f"frequent complaints regarding {neg_aspect_names[0].lower() if neg_aspect_names else 'poor durability'}"
+        elif neg_pct < 15.0 and not defect_sents:
+            dislikes_part = None
         else:
-            drawback_str = "Reported concerns primarily involve minor operational inconveniences rather than systemic product failures."
+            dislikes_part = "minor operational inconveniences"
 
-        # Sentence 4: Brief concluding assessment of whether the product appears worthwhile
-        if verdict_sentiment == "PROCEED":
-            conclusion_str = "Overall, the product offers solid value for money for shoppers seeking a reliable everyday option."
-        elif verdict_sentiment == "PROCEED_WITH_CAUTION":
-            conclusion_str = "It represents reasonable value for budget-focused buyers, but those prioritizing long-term durability should verify warranty coverage."
-        elif verdict_sentiment == "AVOID":
-            conclusion_str = "Given the frequency of recurring defects, this product presents significant purchase risks and is difficult to recommend."
+        if pos_pct >= 75.0 and not has_critical_defects:
+            s1 = f"Customer consensus is overwhelmingly positive: buyers consistently praise and like the {likes_part}, with no recurring critical defects."
+            s2 = f"The most widely appreciated strengths center on dependable {likes_part}, frequently highlighted as a standout advantage."
+            s3 = "Reported concerns are minimal and primarily involve minor operational preferences rather than product failures."
+            s4 = f"It represents a reliable and worthwhile choice if you are looking for dependable {pos_aspect_names[0].lower() if pos_aspect_names else 'everyday performance'}."
+            overall_summary = f"{s1} {s2} {s3} {s4}"
+        elif has_critical_defects and pos_pct >= 60.0:
+            s1 = f"Customer feedback is largely favorable: buyers generally like the {likes_part} for routine daily use."
+            s2 = f"However, recurring reports of premature {defect_cue} issues raise meaningful durability concerns that prospective buyers should weigh."
+            s3 = f"Reported defects center on {defect_cue}, although core functionality remains appreciated by most reviewers."
+            s4 = f"It seems worth considering if you need its core features, as long as long-term {defect_cue} durability is not your main priority."
+            overall_summary = f"{s1} {s2} {s3} {s4}"
+        elif (abs(pos_pct - neg_pct) <= 25.0 and pos_pct >= 30.0 and neg_pct >= 20.0) or (pos_pct >= 30.0 and neg_pct <= 50.0):
+            # Mixed / divided feedback
+            s1 = "Customer feedback is divided with mixed opinions, reflecting varied everyday experiences and noticeable product trade-offs."
+            s2 = f"Buyers generally like the {likes_part}, frequently citing reliable everyday utility as a worthwhile benefit."
+            s3 = f"Conversely, critical feedback centers on {dislikes_part}, which several reviewers report as a frustrating limitation."
+            s4 = f"It seems worth considering if you need its core features, as long as {neg_aspect_names[0].lower() if neg_aspect_names else 'secondary features'} is not your main priority."
+            overall_summary = f"{s1} {s2} {s3} {s4}"
+        elif neg_pct >= 45.0 or pos_pct < 35.0:
+            s1 = "Customer reviews reflect substantial dissatisfaction, with frequent complaints concerning performance and overall durability."
+            s2 = "Recurring reports of premature product failure and defective components dominate customer experiences, and no strong positive commendations stand out."
+            s3 = f"Critical complaints center on {dislikes_part}, which reviewers cite as an ongoing and frustrating limitation."
+            s4 = "Given the frequency of recurring defects, this product presents significant purchase risks and it is probably best to explore other alternatives."
+            overall_summary = f"{s1} {s2} {s3} {s4}"
         else:
-            conclusion_str = "Additional review evidence is recommended before making a final purchasing decision."
-
-        if total_reviews < 15:
-            scope_str = f"(Caution: Sample size of {total_reviews} reviews is small; broader generalizability may vary.)"
-            overall_summary = f"{exp_str} {benefit_str} {drawback_str} {conclusion_str} {scope_str}"
-        else:
-            overall_summary = f"{exp_str} {benefit_str} {drawback_str} {conclusion_str}"
+            # Fallback mixed
+            s1 = "Customer feedback is divided with mixed opinions, reflecting varied everyday experiences and noticeable product trade-offs."
+            s2 = f"Buyers generally like the {likes_part}, frequently citing reliable everyday utility as a worthwhile benefit."
+            s3 = f"Conversely, critical feedback centers on {dislikes_part}, which several reviewers report as a frustrating limitation."
+            s4 = f"It seems worth considering if you need its core features, as long as {neg_aspect_names[0].lower() if neg_aspect_names else 'secondary features'} is not your main priority."
+            overall_summary = f"{s1} {s2} {s3} {s4}"
 
         # Suitability
         if pos_aspect_names:

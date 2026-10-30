@@ -13,12 +13,6 @@ import type {
   ExtractedReview,
   ComparePricesResponse,
 } from "./lib/reviewTypes";
-import {
-  SAMPLE_REVIEWS_BATCH,
-  DEMO_PRODUCT_NAME,
-  DEMO_PRICE,
-  DEMO_MRP,
-} from "./lib/sampleReviews";
 
 const API_BASE = "http://127.0.0.1:8000";
 
@@ -46,20 +40,20 @@ export default function App() {
     useState<BatchReviewAnalysisResponse | null>(null);
   const [reviewLoading, setReviewLoading] = useState(false);
   const [reviewError, setReviewError] = useState<string | null>(null);
+  const [analysisStep, setAnalysisStep] = useState<string | null>(null);
 
   // Price comparison state
   const [comparison, setComparison] = useState<ComparePricesResponse | null>(null);
   const [comparisonLoading, setComparisonLoading] = useState(false);
   const [comparisonError, setComparisonError] = useState<string | null>(null);
 
-  // Analysis source tracking: "live_dom" | "demo" | "manual" (Requirement 6 & 7)
+  // Analysis source tracking: "live_dom" | "demo" | "manual"
   const [analysisSource, setAnalysisSource] = useState<
     "live_dom" | "demo" | "manual"
   >("live_dom");
-  const [isDemoMode, setIsDemoMode] = useState<boolean>(false);
-  const [targetReviewCount, setTargetReviewCount] = useState<number>(100);
 
   const currentRequestIdRef = useRef<number>(0);
+  const currentComparisonIdRef = useRef<number>(0);
   const activeProductKeyRef = useRef<string>("");
 
   useEffect(() => {
@@ -107,7 +101,6 @@ export default function App() {
         product_name: product.product_name,
         url: product.url,
         source_retailer: product.source_retailer || "Amazon.in",
-        target_count: targetReviewCount,
         reviews: reviewsToSend.map((r, i) => ({
           id: r.id || `rev_${i + 1}`,
           text: r.text,
@@ -138,6 +131,7 @@ export default function App() {
         }
 
         const data: BatchReviewAnalysisResponse = await res.json();
+        if (reqId !== currentRequestIdRef.current) return;
 
         // Debug logging (Requirement 7)
         console.log("[DealSense Debug Backend Response]", {
@@ -150,6 +144,7 @@ export default function App() {
           source,
         });
 
+        if (reqId !== currentRequestIdRef.current) return;
         setReviewAnalysis(data);
         setReviewLoading(false);
         if (directToResult) {
@@ -174,8 +169,9 @@ export default function App() {
   /**
    * Run cross-store price comparison against the FastAPI backend
    */
-  const handleComparePrices = useCallback(async (product: ExtractedProduct, customQuery?: string) => {
+  const handleComparePrices = useCallback(async (product: ExtractedProduct, customQuery?: string, explicitCompId?: number) => {
     if (!product || !product.product_name) return;
+    const compId = explicitCompId !== undefined ? explicitCompId : ++currentComparisonIdRef.current;
     setComparisonLoading(true);
     setComparisonError(null);
     try {
@@ -202,14 +198,17 @@ export default function App() {
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify(payload),
       });
+      if (compId !== currentComparisonIdRef.current) return;
       if (!res.ok) {
         const errJson = await res.json().catch(() => ({}));
         throw new Error(errJson.detail || `Server returned HTTP ${res.status}`);
       }
       const data: ComparePricesResponse = await res.json();
+      if (compId !== currentComparisonIdRef.current) return;
       setComparison(data);
       setComparisonLoading(false);
     } catch (err: any) {
+      if (compId !== currentComparisonIdRef.current) return;
       setComparisonLoading(false);
       setComparisonError(err.message || "Comparison request failed.");
     }
@@ -219,28 +218,58 @@ export default function App() {
    * Scan the active browser tab on load (Requirement 1, 2, 7)
    */
   const scanActiveTab = useCallback(async () => {
+    const scanReqId = ++currentRequestIdRef.current;
+    const scanCompId = ++currentComparisonIdRef.current;
     setExtractionStatus("loading");
     setReviewError(null);
     setReviewAnalysis(null);
     setComparison(null);
     setComparisonError(null);
-    setIsDemoMode(false);
     setAnalysisSource("live_dom");
 
     try {
       const prod = await extractActiveTabProduct();
+      if (scanReqId !== currentRequestIdRef.current) return;
       if (!prod) {
+        activeProductKeyRef.current = "";
         setExtractedProduct(null);
         setExtractionStatus("unsupported");
         console.warn("[DealSense Debug] Active tab is not a supported Amazon or Flipkart product page");
         return;
       }
 
+      const prodKey = `${prod.source_retailer}::${prod.retailer_product_id || prod.asin || prod.url}::${prod.variant || ""}`;
+      activeProductKeyRef.current = prodKey;
       setExtractedProduct(prod);
       setExtractionStatus("success");
 
       // Auto-trigger price comparison
-      handleComparePrices(prod);
+      handleComparePrices(prod, undefined, scanCompId);
+
+      // Restore background analysis job state if active or completed for this product
+      if (typeof chrome !== "undefined" && chrome.runtime?.sendMessage) {
+        chrome.runtime.sendMessage(
+          { action: "getAnalysisJob", productKey: prodKey },
+          (resp: any) => {
+            if (chrome.runtime?.lastError || !resp || !resp.job) return;
+            const job = resp.job;
+            if (job.status === "completed" && job.analysisResult) {
+              setReviewAnalysis(job.analysisResult);
+              setReviewLoading(false);
+              setReviewError(null);
+              setView("result");
+            } else if (job.status === "collecting" || job.status === "analyzing") {
+              setReviewLoading(true);
+              setAnalysisStep(job.step || "Analyzing reviews in background...");
+              setView("analyzing");
+            } else if (job.status === "error" && job.error) {
+              setReviewError(job.error);
+              setReviewLoading(false);
+              setView("result");
+            }
+          }
+        );
+      }
 
       // Debug logging (Requirement 7)
       console.log("[DealSense Debug Scan Success]", {
@@ -252,6 +281,7 @@ export default function App() {
         source: "live_dom",
       });
     } catch (e) {
+      if (scanReqId !== currentRequestIdRef.current) return;
       console.warn("[DealSense Debug] Extraction error:", e);
       setExtractionStatus("error");
     }
@@ -283,22 +313,63 @@ export default function App() {
       chrome.runtime.onMessage
     ) {
       const listener = (msg: any) => {
-        if (msg && msg.action === "productUpdated" && msg.data) {
-          setExtractedProduct(msg.data);
-          setExtractionStatus("success");
-          setReviewAnalysis(null);
-          setIsDemoMode(false);
-          setAnalysisSource("live_dom");
-          console.log("[DealSense Debug Dynamic Update]", {
-            title: msg.data.product_name,
-            asin: msg.data.asin || "N/A",
-            reviewCount: msg.data.reviews?.length ?? 0,
-            source: "live_dom",
-          });
+        if (msg && msg.action === "analysisProgress" && msg.job) {
+          if (msg.job.productKey === activeProductKeyRef.current) {
+            setReviewLoading(true);
+            setAnalysisStep(msg.job.step);
+            setView("analyzing");
+          }
+        } else if (msg && msg.action === "analysisCompleted" && msg.job) {
+          if (msg.job.productKey === activeProductKeyRef.current) {
+            setReviewAnalysis(msg.job.analysisResult);
+            setReviewLoading(false);
+            setReviewError(null);
+            setView("result");
+          }
+        } else if (msg && msg.action === "analysisError" && msg.job) {
+          if (msg.job.productKey === activeProductKeyRef.current) {
+            setReviewLoading(false);
+            setReviewError(msg.job.error);
+            setView("result");
+          }
+        } else if (msg && msg.action === "productUpdated" && msg.data) {
+          const newProd = msg.data;
+          const newProdKey = `${newProd.source_retailer}::${newProd.retailer_product_id || newProd.asin || newProd.url}::${newProd.variant || ""}`;
+
+          // Only reset when switching to a completely different product
+          if (newProdKey !== activeProductKeyRef.current) {
+            currentRequestIdRef.current++;
+            const newCompId = ++currentComparisonIdRef.current;
+            activeProductKeyRef.current = newProdKey;
+
+            setExtractedProduct(newProd);
+            setExtractionStatus("success");
+            setReviewAnalysis(null);
+            setReviewError(null);
+            setComparison(null);
+            setComparisonError(null);
+            setAnalysisSource("live_dom");
+            setView("ready");
+
+            console.log("[DealSense Debug Dynamic Update]", {
+              title: newProd.product_name,
+              asin: newProd.asin || "N/A",
+              reviewCount: newProd.reviews?.length ?? 0,
+              source: "live_dom",
+            });
+
+            // Auto-trigger comparison for the new product
+            handleComparePrices(newProd, undefined, newCompId);
+          }
         } else if (msg && msg.action === "productUnavailable") {
+          currentRequestIdRef.current++;
+          currentComparisonIdRef.current++;
+          activeProductKeyRef.current = "";
           setExtractedProduct(null);
           setExtractionStatus("unsupported");
           setReviewAnalysis(null);
+          setComparison(null);
+          setView("ready");
         }
       };
       chrome.runtime.onMessage.addListener(listener);
@@ -306,7 +377,7 @@ export default function App() {
         chrome.runtime.onMessage.removeListener(listener);
       };
     }
-  }, [scanActiveTab]);
+  }, [scanActiveTab, handleComparePrices]);
 
   /**
    * Primary action on Ready screen: analyze reviews (Requirement 3, 4, 5, 6)
@@ -316,6 +387,9 @@ export default function App() {
    */
   const handleAnalyze = useCallback(async () => {
     if (!extractedProduct) return;
+    const analyzeReqId = ++currentRequestIdRef.current;
+    const prodKey = `${extractedProduct.source_retailer}::${extractedProduct.retailer_product_id || extractedProduct.asin || extractedProduct.url}::${extractedProduct.variant || ""}`;
+    activeProductKeyRef.current = prodKey;
     const currentReviews = extractedProduct.reviews || [];
 
     console.log("[DealSense Debug Analyze Triggered]", {
@@ -323,143 +397,44 @@ export default function App() {
       asin: extractedProduct.asin || extractedProduct.retailer_product_id || "N/A",
       url: extractedProduct.url,
       currentReviewCount: currentReviews.length,
-      targetReviewCount,
-      source: isDemoMode ? "demo" : "live_dom",
+      source: analysisSource === "manual" ? "manual" : "live_dom",
     });
 
-    if (isDemoMode || analysisSource === "manual") {
-      if (currentReviews.length === 0) {
-        setReviewError(
-          "Could not retrieve customer reviews. Please click 'Try Demo Mode' or paste review text manually."
-        );
-        setReviewAnalysis(null);
-        setView("result");
-        return;
-      }
-      runReviewAnalysis(extractedProduct, currentReviews, isDemoMode ? "demo" : "manual", true);
-      return;
-    }
-
-    // If active product already has enough reviews for the chosen target, analyze directly
-    if (currentReviews.length >= targetReviewCount) {
-      runReviewAnalysis(extractedProduct, currentReviews, "live_dom", true);
-      return;
-    }
-
-    // Trigger multi-page review collection in active tab
     setView("analyzing");
     setReviewLoading(true);
     setReviewError(null);
+    setAnalysisStep("Initializing background review collection...");
 
-    try {
-      const collectRes = await collectTabReviews({
-        targetCount: targetReviewCount,
-        maxCount: targetReviewCount === 300 ? 300 : 100,
-        diversify: true,
-      });
-
-      let reviewsToAnalyze = currentReviews;
-      let pagesScanned = extractedProduct.scan_metadata?.pages_scanned || 1;
-      let hasMore = extractedProduct.scan_metadata?.has_more ?? false;
-      let limitationNote = extractedProduct.scan_metadata?.limitation_note ?? null;
-      let ratingDist = extractedProduct.scan_metadata?.rating_distribution;
-
-      if (collectRes && collectRes.reviews && collectRes.reviews.length > 0) {
-        reviewsToAnalyze = collectRes.reviews;
-        pagesScanned = collectRes.pages_scanned;
-        hasMore = collectRes.has_more;
-        limitationNote = collectRes.limitation_note || null;
-        ratingDist = collectRes.rating_distribution;
-
-        const updatedProd: ExtractedProduct = {
-          ...extractedProduct,
-          reviews: collectRes.reviews,
-          scan_metadata: {
-            pages_scanned: pagesScanned,
-            total_reviews_found: collectRes.total_collected,
-            has_more: hasMore,
-            limitation_note: limitationNote,
-            target_count: targetReviewCount,
-            rating_distribution: ratingDist,
-          },
-        };
-        setExtractedProduct(updatedProd);
-      }
-
-      if (reviewsToAnalyze.length === 0) {
-        setReviewLoading(false);
-        setReviewError(
-          "Could not retrieve customer reviews from this page. Please ensure customer reviews are visible (scroll down on Amazon if needed), then click Retry."
-        );
-        setReviewAnalysis(null);
-        setView("result");
-        return;
-      }
-
-      runReviewAnalysis(
+    // Dispatch background analysis job to Manifest V3 Service Worker.
+    // This allows review collection & backend ML analysis to run independently
+    // of the popup lifecycle, ensuring it continues even if Chromium/Helium closes the popup.
+    if (typeof chrome !== "undefined" && chrome.runtime?.sendMessage) {
+      chrome.runtime.sendMessage(
         {
-          ...extractedProduct,
-          reviews: reviewsToAnalyze,
-          scan_metadata: {
-            pages_scanned: pagesScanned,
-            total_reviews_found: reviewsToAnalyze.length,
-            has_more: hasMore,
-            limitation_note: limitationNote,
-            target_count: targetReviewCount,
-            rating_distribution: ratingDist,
-          },
+          action: "startReviewAnalysis",
+          product: extractedProduct,
+          initialReviews: currentReviews,
         },
-        reviewsToAnalyze,
-        "live_dom",
-        true
+        (resp: any) => {
+          if (chrome.runtime?.lastError) {
+            console.warn("[DealSense] startReviewAnalysis response warning:", chrome.runtime.lastError);
+          }
+          if (resp && resp.job) {
+            setAnalysisStep(resp.job.step);
+          }
+        }
       );
-    } catch (err: any) {
-      setReviewLoading(false);
-      setReviewError(err.message || "Failed to collect multi-page customer reviews.");
-      setView("result");
+    } else {
+      // Fallback for non-extension test environments
+      runReviewAnalysis(extractedProduct, currentReviews, analysisSource === "manual" ? "manual" : "live_dom", true);
     }
-  }, [extractedProduct, isDemoMode, analysisSource, targetReviewCount, runReviewAnalysis]);
+  }, [extractedProduct, analysisSource, runReviewAnalysis]);
 
   /**
-   * Dedicated Demo Mode loader - explicitly isolated (Requirement 6)
-   */
-  const handleLoadDemoReviews = useCallback(() => {
-    setIsDemoMode(true);
-    setAnalysisSource("demo");
-
-    const demoProd: ExtractedProduct = {
-      source_retailer: "Amazon.in",
-      product_name: `[DEMO DATASET] ${DEMO_PRODUCT_NAME}`,
-      url: "https://www.amazon.in/dp/B09XS7JWHH",
-      current_site_price: DEMO_PRICE,
-      mrp: DEMO_MRP,
-      seller: "Appario Retail Pvt Ltd",
-      asin: "B09XS7JWHH",
-      retailer_product_id: "B09XS7JWHH",
-      image:
-        "https://images.unsplash.com/photo-1546435770-a3e426bf472b?w=200&h=200&fit=crop&auto=format",
-      reviews: SAMPLE_REVIEWS_BATCH,
-    };
-
-    setExtractedProduct(demoProd);
-    setExtractionStatus("success");
-
-    console.log("[DealSense Debug Demo Loaded]", {
-      title: demoProd.product_name,
-      asin: demoProd.asin,
-      reviewCount: SAMPLE_REVIEWS_BATCH.length,
-      source: "demo",
-    });
-
-    runReviewAnalysis(demoProd, SAMPLE_REVIEWS_BATCH, "demo", true);
-  }, [runReviewAnalysis]);
-
-  /**
-   * Handle manual review paste fallback (Requirement 5)
+   * Handle manual review paste fallback
    */
   const handleAnalyzeCustomReviews = useCallback(
     (reviews: ExtractedReview[]) => {
-      setIsDemoMode(false);
       setAnalysisSource("manual");
 
       const baseProduct: ExtractedProduct = extractedProduct || {
@@ -471,13 +446,30 @@ export default function App() {
         seller: "Manual Input",
       };
 
-      console.log("[DealSense Debug Manual Input]", {
-        title: baseProduct.product_name,
-        reviewCount: reviews.length,
-        source: "manual",
-      });
+      const prodKey = `Manual::${baseProduct.url}::${Date.now()}`;
+      activeProductKeyRef.current = prodKey;
 
-      runReviewAnalysis(baseProduct, reviews, "manual", true);
+      setView("analyzing");
+      setReviewLoading(true);
+      setReviewError(null);
+      setAnalysisStep("Analyzing custom pasted reviews...");
+
+      if (typeof chrome !== "undefined" && chrome.runtime?.sendMessage) {
+        chrome.runtime.sendMessage(
+          {
+            action: "startReviewAnalysis",
+            product: baseProduct,
+            initialReviews: reviews,
+          },
+          (resp: any) => {
+            if (resp && resp.job) {
+              setAnalysisStep(resp.job.step);
+            }
+          }
+        );
+      } else {
+        runReviewAnalysis(baseProduct, reviews, "manual", true);
+      }
     },
     [extractedProduct, runReviewAnalysis]
   );
@@ -534,16 +526,13 @@ export default function App() {
           reviewAnalysis={reviewAnalysis}
           reviewLoading={reviewLoading}
           reviewError={reviewError}
+          analysisStep={analysisStep}
           onAnalyzeReviews={handleAnalyzeCustomReviews}
-          onLoadSampleReviews={handleLoadDemoReviews}
           analysisSource={analysisSource}
-          isDemoMode={isDemoMode}
           comparison={comparison}
           comparisonLoading={comparisonLoading}
           comparisonError={comparisonError}
           onComparePrices={(customQuery?: string) => extractedProduct && handleComparePrices(extractedProduct, customQuery)}
-          targetReviewCount={targetReviewCount}
-          onSetTargetReviewCount={setTargetReviewCount}
         />
       </main>
     </div>

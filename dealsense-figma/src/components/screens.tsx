@@ -6,6 +6,8 @@ import type {
   ExtractedReview,
   ComparePricesResponse,
   ComparableOffer,
+  AspectItem,
+  AnalyzedReviewItem,
 } from "../lib/reviewTypes";
 import {
   ArrowLeft,
@@ -34,16 +36,14 @@ export interface Props {
   reviewAnalysis?: BatchReviewAnalysisResponse | null;
   reviewLoading?: boolean;
   reviewError?: string | null;
+  analysisStep?: string | null;
   onAnalyzeReviews?: (reviews: ExtractedReview[]) => void;
   onLoadSampleReviews?: () => void;
   analysisSource?: "live_dom" | "demo" | "manual";
-  isDemoMode?: boolean;
   comparison?: ComparePricesResponse | null;
   comparisonLoading?: boolean;
   comparisonError?: string | null;
   onComparePrices?: (customQuery?: string) => void;
-  targetReviewCount?: number;
-  onSetTargetReviewCount?: (target: number) => void;
 }
 
 /* ---------- primitives ---------- */
@@ -75,6 +75,7 @@ function Btn({
   };
   return (
     <button
+      type="button"
       onClick={onClick}
       disabled={disabled}
       className={`${base} ${variants[variant]} ${className}`}
@@ -485,41 +486,297 @@ function ComparablePricesSection({
   );
 }
 
-function Ready({
+function getAspectSentiment(asp: AspectItem): { label: "Positive" | "Negative" | "Mixed" | "Limited Data"; className: string } {
+  let label: "Positive" | "Negative" | "Mixed" | "Limited Data";
+  const rawLabel = (asp.sentiment_label || "").trim().toLowerCase();
+
+  if (rawLabel === "positive") {
+    label = "Positive";
+  } else if (rawLabel === "negative") {
+    label = "Negative";
+  } else if (rawLabel === "mixed") {
+    label = "Mixed";
+  } else if (asp.mention_count !== undefined && asp.mention_count < 2) {
+    label = "Limited Data";
+  } else if (asp.positive_percentage !== undefined && asp.positive_percentage >= 70) {
+    label = "Positive";
+  } else if (asp.negative_percentage !== undefined && asp.negative_percentage >= 45) {
+    label = "Negative";
+  } else {
+    label = "Mixed";
+  }
+
+  const className =
+    label === "Positive"
+      ? "bg-emerald-500/15 text-emerald-600 dark:text-emerald-400 border-emerald-500/30"
+      : label === "Negative"
+      ? "bg-rose-500/15 text-rose-600 dark:text-rose-400 border-rose-500/30"
+      : label === "Mixed"
+      ? "bg-amber-500/15 text-amber-700 dark:text-amber-400 border-amber-500/30"
+      : "bg-muted text-muted-foreground border-border";
+
+  return { label, className };
+}
+
+function getAspectExplanation(asp: AspectItem): string {
+  const mentions = asp.mention_count ?? 0;
+  const rawLabel = (asp.sentiment_label || "").trim().toLowerCase();
+
+  // 1. Insufficient review evidence for sparse mentions (< 2)
+  if (mentions < 2 || rawLabel === "limited data" || rawLabel === "no data") {
+    return "Insufficient review evidence.";
+  }
+
+  // Determine effective sentiment
+  let sentiment: "positive" | "negative" | "mixed";
+  if (rawLabel === "positive" || (asp.positive_percentage !== undefined && asp.positive_percentage >= 70 && (asp.negative_percentage ?? 0) <= 25)) {
+    sentiment = "positive";
+  } else if (rawLabel === "negative" || (asp.negative_percentage !== undefined && asp.negative_percentage >= 45)) {
+    sentiment = "negative";
+  } else {
+    sentiment = "mixed";
+  }
+
+  // Normalize aspect domain from aspect_id and display_name
+  const nameNorm = (asp.display_name || asp.aspect_id || "").toLowerCase();
+  const idNorm = (asp.aspect_id || "").toLowerCase();
+  const combinedKey = `${idNorm} ${nameNorm}`;
+
+  // Analyze text signals across excerpts to detect specific nuances without reproducing crude wording
+  const posText = (asp.positive_excerpts || []).join(" ").toLowerCase();
+  const negText = (asp.negative_excerpts || []).join(" ").toLowerCase();
+  const allText = `${posText} ${negText}`;
+
+  // Specific evidence nuance flags
+  const hasSlowCharging = /slow as hell|slow\s+charg|charging\s+is\s+slow|takes\s+forever|crap\s+charger|slow\s+speed/i.test(negText);
+  const hasFastDrain = /drain|dies\s+fast|battery\s+dies|poor\s+backup|rapid\s+discharge/i.test(negText);
+  const hasBulkyDesign = /bulky|chunky|heavy\s+design|thick|little\s+bit\s+bulky/i.test(negText);
+  const hasMinorBulky = /little\s+bit\s+bulky|not\s+that\s+bad/i.test(negText);
+  const hasEarlyFailure = /went\s+bad|two\s+days|stopped\s+working|broke\s+in|broke\s+within|died\s+after|defective|drift/i.test(negText);
+  const hasDiscomfort = /crab|uncomfortable|pain|tight|hurts|clamp|fatigue|pressure/i.test(negText);
+  const hasNoise = /noise|noisy|loud|jet\s+engine|airplane|humming/i.test(negText);
+  const hasHeat = /heat|heats|oven|warm|thermal|overheating/i.test(negText);
+  const hasInconsistentSizing = /sizing|inconsistent|too\s+small|too\s+large|tight\s+fit|loose\s+fit/i.test(allText);
+  const hasAssemblyDifficulty = /assembl|difficult|hard\s+to\s+assemble|confusing|instructions/i.test(allText);
+  const hasWeakBass = /bass|muddy|low\s+end|weak\s+bass/i.test(negText);
+  const hasMicIssue = /mic|microphone|muffled\s+voice|call\s+quality/i.test(negText);
+
+  // A. VALUE FOR MONEY & PRICING
+  if (combinedKey.includes("value") || combinedKey.includes("price") || combinedKey.includes("pricing") || combinedKey.includes("cost") || combinedKey.includes("worth")) {
+    if (sentiment === "positive") return "Offers competitive features for its price.";
+    if (sentiment === "negative") return "Pricing is widely viewed as high for what is offered.";
+    return "Feature set is solid, but pricing feels somewhat steep.";
+  }
+
+  // B. BATTERY LIFE & CHARGING
+  if (combinedKey.includes("battery") || combinedKey.includes("charging") || combinedKey.includes("power backup")) {
+    if (sentiment === "positive") {
+      return /rapid|fast|quick/i.test(posText)
+        ? "Long-lasting battery endurance with rapid charging capability."
+        : "Delivers dependable battery endurance for daily usage.";
+    }
+    if (sentiment === "negative") {
+      if (hasSlowCharging) return "Charging is slower than some buyers expect.";
+      if (hasFastDrain) return "Battery drains faster than expected during regular use.";
+      return "Battery endurance falls noticeably short of expectations.";
+    }
+    // Mixed
+    if (hasSlowCharging) return "Battery performance appears acceptable, but charging speed receives criticism.";
+    if (hasFastDrain) return "Battery endurance is adequate, though heavy usage requires frequent recharging.";
+    return "Battery performance appears acceptable, but endurance varies with heavy usage.";
+  }
+
+  // C. BUILD QUALITY & MATERIALS
+  if (combinedKey.includes("build") || combinedKey.includes("material") || combinedKey.includes("finish") || combinedKey.includes("construction") || combinedKey.includes("sturdy")) {
+    if (sentiment === "positive") return "Solid construction with quality materials.";
+    if (sentiment === "negative") {
+      if (hasBulkyDesign && !hasMinorBulky) return "Bulky form factor makes handling cumbersome.";
+      return "Construction materials feel less robust than expected.";
+    }
+    // Mixed
+    if (hasMinorBulky) return "Some buyers find the design bulky, although the concern appears minor.";
+    if (hasBulkyDesign) return "Most feedback is favourable, although some buyers find the design bulky.";
+    return "Overall construction is satisfactory, though certain components feel less premium.";
+  }
+
+  // D. COMFORT & ERGONOMICS
+  if (combinedKey.includes("comfort") || combinedKey.includes("ergonom") || combinedKey.includes("grip") || (combinedKey.includes("fit") && !combinedKey.includes("siz"))) {
+    if (sentiment === "positive") return "Comfortable fit with lightweight ergonomics.";
+    if (sentiment === "negative") {
+      if (hasDiscomfort) return "Some buyers report discomfort during extended use.";
+      return "Ergonomics and fit draw complaints during daily use.";
+    }
+    return "Generally comfortable for short periods, but extended wear causes fatigue.";
+  }
+
+  // E. DURABILITY & LONGEVITY
+  if (combinedKey.includes("durab") || combinedKey.includes("longev") || combinedKey.includes("reliability") || combinedKey.includes("lifespan")) {
+    if (sentiment === "positive") return "Demonstrates dependable long-term reliability and build integrity.";
+    if (sentiment === "negative") {
+      if (hasEarlyFailure) return "Reports of early product failure raise concerns about long-term reliability.";
+      return "Frequent complaints regarding premature wear and component failure.";
+    }
+    if (hasEarlyFailure) return "A buyer reported an early product failure, though most units hold up.";
+    return "Durability is acceptable for light use, with minor signs of wear reported.";
+  }
+
+  // F. SOUND & AUDIO QUALITY
+  if (combinedKey.includes("sound") || combinedKey.includes("audio") || combinedKey.includes("speaker") || combinedKey.includes("acoustic") || combinedKey.includes("bass")) {
+    if (sentiment === "positive") return "Delivers clear audio output with balanced frequencies.";
+    if (sentiment === "negative") {
+      if (hasMicIssue) return "Microphone pickup is muffled and lacks clarity during calls.";
+      return "Audio output lacks clarity and exhibits noticeable distortion.";
+    }
+    if (hasWeakBass) return "Clear audio output, but bass quality receives mixed feedback.";
+    if (hasMicIssue) return "Clear audio output, though microphone clarity receives mixed feedback.";
+    return "Audio playback is clear, although tonal balance divides opinion.";
+  }
+
+  // G. PERFORMANCE & FUNCTIONALITY
+  if (combinedKey.includes("perform") || combinedKey.includes("speed") || combinedKey.includes("response") || combinedKey.includes("functionality")) {
+    if (sentiment === "positive") return "Smooth and responsive operational performance across tasks.";
+    if (sentiment === "negative") {
+      if (hasNoise) return "Excessive operational noise disrupts everyday use.";
+      if (hasHeat) return "Excessive heat buildup causes thermal throttling.";
+      return "Frequent performance lag and sluggish response times.";
+    }
+    if (hasNoise) return "Buyers appreciate its ease of use, but some report excessive operating noise.";
+    if (hasHeat) return "Performance is generally well received, while battery endurance remains a concern.";
+    return "Performance is generally well received, with occasional slowdowns noted under load.";
+  }
+
+  // H. FIT & SIZING
+  if (combinedKey.includes("fit") || combinedKey.includes("siz")) {
+    if (sentiment === "positive") return "Fits true to size with comfortable proportions.";
+    if (sentiment === "negative") return "Sizing is inconsistent and deviates notably from standard measurements.";
+    return "The fabric receives positive feedback, although sizing appears inconsistent.";
+  }
+
+  // I. FABRIC & MATERIAL QUALITY
+  if (combinedKey.includes("fabric") || combinedKey.includes("cloth") || combinedKey.includes("cotton") || combinedKey.includes("leather") || combinedKey.includes("texture")) {
+    if (sentiment === "positive") return "High-quality fabric with a pleasant tactile feel.";
+    if (sentiment === "negative") return "Fabric feels thin and prone to premature wear.";
+    return "Fabric receives positive feedback, although sizing appears inconsistent.";
+  }
+
+  // J. ASSEMBLY & INSTALLATION
+  if (combinedKey.includes("assembl") || combinedKey.includes("install") || combinedKey.includes("putting together")) {
+    if (sentiment === "positive") return "Straightforward assembly with clear and well-organized instructions.";
+    if (sentiment === "negative") return "Assembly is challenging due to ambiguous instructions and misaligned parts.";
+    return "Several buyers praise the finish, but assembly can be difficult.";
+  }
+
+  // K. DELIVERY & PACKAGING
+  if (combinedKey.includes("deliver") || combinedKey.includes("packag") || combinedKey.includes("shipping")) {
+    if (sentiment === "positive") return "Prompt delivery with secure protective packaging.";
+    if (sentiment === "negative") return "Frequent delivery delays and damaged outer packaging.";
+    return "Delivered on schedule, though outer packaging showed handling wear.";
+  }
+
+  // L. EASE OF USE & SETUP
+  if (combinedKey.includes("ease") || combinedKey.includes("setup") || combinedKey.includes("simple")) {
+    if (sentiment === "positive") return "Intuitive controls with an effortless initial setup.";
+    if (sentiment === "negative") return "Complicated setup and unintuitive everyday controls.";
+    return "Basic operation is simple, but advanced features require a learning curve.";
+  }
+
+  // M. TASTE & FLAVOR
+  if (combinedKey.includes("taste") || combinedKey.includes("flavor") || combinedKey.includes("flavour") || combinedKey.includes("scent") || combinedKey.includes("fragrance")) {
+    if (sentiment === "positive") return "Pleasant flavor profile with natural, fresh taste.";
+    if (sentiment === "negative") return "Flavor is underwhelming and artificial in taste.";
+    return "Flavor is pleasant, though sweetness levels divide consumer preferences.";
+  }
+
+  // N. DISPLAY & SCREEN
+  if (combinedKey.includes("display") || combinedKey.includes("screen") || combinedKey.includes("panel")) {
+    if (sentiment === "positive") return "Vibrant color reproduction and sharp viewing clarity.";
+    if (sentiment === "negative") return "Display lacks brightness and exhibits muted color contrast.";
+    return "Sharp display indoors, though outdoor brightness is somewhat limited.";
+  }
+
+  // O. CAMERA QUALITY
+  if (combinedKey.includes("camera") || combinedKey.includes("photo") || combinedKey.includes("picture")) {
+    if (sentiment === "positive") return "Captures sharp photos with accurate color reproduction.";
+    if (sentiment === "negative") return "Camera performance is grainy with sluggish focusing speeds.";
+    return "Good daylight photography, though low-light shots suffer from noise.";
+  }
+
+  // P. GENERIC / DYNAMIC CATEGORY FALLBACK
+  const cleanName = (asp.display_name || "feature").trim().toLowerCase();
+  if (sentiment === "positive") {
+    return `Demonstrates dependable quality and solid ${cleanName}.`;
+  }
+  if (sentiment === "negative") {
+    return `Performance regarding ${cleanName} falls short of expectations.`;
+  }
+  return `Feedback on ${cleanName} is mostly favourable, with minor reservations noted.`;
+}
+
+function ProductDashboard({
   product,
   status,
+  view,
   go,
   onAnalyze,
   onRetry,
-  onLoadSampleReviews,
-  isDemoMode,
+  reviewAnalysis,
+  reviewLoading,
+  reviewError,
+  analysisStep,
+  analysisSource = "live_dom",
   comparison,
   comparisonLoading,
   comparisonError,
   onComparePrices,
-  targetReviewCount = 100,
-  onSetTargetReviewCount,
 }: {
   product: ExtractedProduct | null;
   status: "loading" | "success" | "unsupported" | "error";
+  view: View;
   go: (v: View) => void;
   onAnalyze: () => void;
   onRetry: () => void;
-  onLoadSampleReviews?: () => void;
-  isDemoMode?: boolean;
+  reviewAnalysis?: BatchReviewAnalysisResponse | null;
+  reviewLoading?: boolean;
+  reviewError?: string | null;
+  analysisStep?: string | null;
+  analysisSource?: "live_dom" | "demo" | "manual";
   comparison?: ComparePricesResponse | null;
   comparisonLoading?: boolean;
   comparisonError?: string | null;
   onComparePrices?: (customQuery?: string) => void;
-  targetReviewCount?: number;
-  onSetTargetReviewCount?: (target: number) => void;
 }) {
   const [imgSrc, setImgSrc] = useState<string | null>(product?.image || null);
+  const [showAllAspects, setShowAllAspects] = useState<boolean>(false);
+  const [activeTab, setActiveTab] = useState<"price" | "review">(() => {
+    return view === "result" || view === "analyzing" ? "review" : "price";
+  });
+
+  const prevProdKeyRef = useRef<string>("");
+  const prodKey = product
+    ? `${product.source_retailer}::${product.asin || product.retailer_product_id || product.url}`
+    : "";
 
   useEffect(() => {
     setImgSrc(product?.image || null);
   }, [product?.image]);
 
+  useEffect(() => {
+    // When product changes, reset to default PRICE COMPARISON tab
+    if (prodKey && prodKey !== prevProdKeyRef.current) {
+      prevProdKeyRef.current = prodKey;
+      setActiveTab("price");
+      setShowAllAspects(false);
+    }
+  }, [prodKey]);
+
+  useEffect(() => {
+    // Automatically switch to review tab when analysis is running or completed
+    if (view === "result" || view === "analyzing" || reviewLoading) {
+      setActiveTab("review");
+    }
+  }, [view, reviewLoading]);
+
+  // Loading state
   if (status === "loading") {
     return (
       <div className="sg-fade flex flex-col items-center justify-center px-6 py-14 text-center gap-4">
@@ -529,13 +786,14 @@ function Ready({
         <div>
           <div className="text-[14px] font-semibold text-foreground">Scanning product page</div>
           <p className="mt-1 text-[12px] text-muted-foreground leading-relaxed max-w-[260px]">
-            Detecting product title, ASIN, and customer reviews on the active Amazon India tab...
+            Detecting product title, ASIN, and customer reviews on the active tab...
           </p>
         </div>
       </div>
     );
   }
 
+  // Unsupported page state
   if (status === "unsupported" || !product) {
     return (
       <div className="sg-fade flex flex-col items-center justify-center px-6 py-10 text-center gap-4">
@@ -545,7 +803,7 @@ function Ready({
         <div>
           <div className="text-[14px] font-semibold text-foreground">No supported product detected</div>
           <p className="mt-1.5 text-[12px] text-muted-foreground leading-relaxed max-w-[280px]">
-            Open an Amazon India (amazon.in) or Flipkart product page to analyze customer reviews and detect suspicious patterns.
+            Open an Amazon India (amazon.in) or Flipkart product page to compare prices and analyze customer reviews.
           </p>
         </div>
         <div className="mt-1 flex flex-col gap-2 w-full max-w-[260px]">
@@ -553,12 +811,6 @@ function Ready({
             <Refresh width={13} height={13} />
             Re-scan active tab
           </Btn>
-          {onLoadSampleReviews ? (
-            <Btn onClick={onLoadSampleReviews} variant="secondary" className="w-full py-2 text-[12.5px]">
-              <Shield width={13} height={13} />
-              Try Demo Mode (Sample Dataset)
-            </Btn>
-          ) : null}
           <button
             onClick={() => go("manual")}
             className="text-center text-[12px] text-muted-foreground underline underline-offset-4 hover:text-foreground transition pt-1"
@@ -570,6 +822,7 @@ function Ready({
     );
   }
 
+  // Error state
   if (status === "error") {
     return (
       <div className="sg-fade flex flex-col items-center justify-center px-6 py-10 text-center gap-4">
@@ -602,12 +855,67 @@ function Ready({
   const storeName = product.source_retailer || (product.url?.includes("flipkart.com") ? "Flipkart" : "Amazon.in");
   const listedPrice = product.current_site_price;
   const realMrp = product.mrp;
-  const detectedReviewsCount = product.reviews ? product.reviews.length : 0;
   const asinText = product.asin || product.retailer_product_id;
-  const pagesScanned = product.scan_metadata?.pages_scanned || 1;
+  const ra = reviewAnalysis;
+
+  // Credibility and Trust score
+  const trustScore = ra?.trust_score ?? 100;
+  let trustBadgeColor = "text-safe bg-safe-soft border-safe-border";
+  let trustLabel = "HIGH CREDIBILITY";
+  if (trustScore < 60) {
+    trustBadgeColor = "text-destructive bg-destructive/10 border-destructive/30";
+    trustLabel = "HIGH SUSPICION";
+  } else if (trustScore < 80) {
+    trustBadgeColor = "text-caution bg-caution-soft border-caution-border";
+    trustLabel = "MODERATE SIGNALS";
+  }
+
+  const totalAnalyzed = ra?.total_reviews_analyzed ?? 0;
+
+  // Process dynamic aspects
+  const rawAspects = ra?.aspect_analysis?.aspects ? [...ra.aspect_analysis.aspects] : [];
+  if (
+    ra?.aspect_analysis?.delivery_summary &&
+    ra.aspect_analysis.delivery_summary.mentions > 0 &&
+    !rawAspects.some(
+      (a) => a.aspect_id === "delivery_packaging" || a.display_name?.toLowerCase().includes("delivery")
+    )
+  ) {
+    const ds = ra.aspect_analysis.delivery_summary;
+    rawAspects.push({
+      aspect_id: "delivery_packaging",
+      display_name: "Delivery & Packaging",
+      category: "logistics_seller",
+      mention_count: ds.mentions,
+      positive_mentions: 0,
+      negative_mentions: 0,
+      positive_percentage: ds.positive_percentage,
+      negative_percentage: 100 - ds.positive_percentage,
+      positive_excerpts: [],
+      negative_excerpts: [],
+      sentiment_label: ds.positive_percentage >= 70 ? "Positive" : ds.positive_percentage < 40 ? "Negative" : "Mixed",
+    });
+  }
+
+  const seenAspectNames = new Set<string>();
+  const allAspects: AspectItem[] = [];
+  for (const asp of rawAspects) {
+    if (!asp) continue;
+    const displayName = (asp.display_name || asp.aspect || (asp as any).name || asp.aspect_id || "").trim();
+    if (!displayName) continue;
+    const mentions = asp.mention_count ?? 0;
+    if (mentions <= 0) continue;
+    const normKey = displayName.toLowerCase();
+    if (seenAspectNames.has(normKey)) continue;
+    seenAspectNames.add(normKey);
+    allAspects.push({ ...asp, display_name: displayName });
+  }
+  allAspects.sort((a, b) => (b.mention_count ?? 0) - (a.mention_count ?? 0));
+  const displayedAspects = showAllAspects ? allAspects : allAspects.slice(0, 5);
 
   return (
-    <div className="sg-fade flex flex-col px-5 py-5 gap-4">
+    <div className="sg-fade flex flex-col px-4 py-3.5 gap-3 max-w-full overflow-hidden text-foreground">
+      {/* 1. Header with Store & Identifier */}
       <div className="flex items-center justify-between">
         <div className="text-[10px] font-semibold uppercase tracking-[0.12em] text-muted-foreground">
           Active Product
@@ -615,7 +923,7 @@ function Ready({
         <div className="flex items-center gap-1.5">
           {asinText ? (
             <span className="rounded bg-muted px-1.5 py-0.5 text-[9px] font-mono font-bold text-foreground border border-border">
-              ASIN: {asinText}
+              {asinText.startsWith("B0") ? "ASIN: " : "ID: "}{asinText}
             </span>
           ) : null}
           <span className="rounded bg-muted px-1.5 py-0.5 text-[9px] font-semibold uppercase tracking-wider text-muted-foreground border border-border">
@@ -624,8 +932,8 @@ function Ready({
         </div>
       </div>
 
-      {/* Product Card with Thumbnail and extracted title */}
-      <div className="flex items-stretch gap-3.5">
+      {/* 2. Compact Product Information Card */}
+      <div className="flex items-stretch gap-3.5 rounded-xl border border-border bg-card p-3">
         <div className="h-[76px] w-[76px] shrink-0 overflow-hidden rounded-xl border border-border bg-muted flex items-center justify-center">
           {imgSrc ? (
             <img
@@ -640,7 +948,7 @@ function Ready({
         </div>
         <div className="min-w-0 pt-0.5 flex-1 flex flex-col justify-between">
           <div>
-            <div className="text-[13.5px] font-semibold leading-snug line-clamp-2 text-foreground" title={productName}>
+            <div className="text-[13px] font-semibold leading-snug line-clamp-2 text-foreground" title={productName}>
               {productName}
             </div>
             {product.variant ? (
@@ -666,21 +974,28 @@ function Ready({
 
       {/* Listing Details: Seller, Brand, Model */}
       <div className="grid grid-cols-3 gap-1.5 text-[10.5px]">
-        <div className="rounded-lg border border-border bg-muted/40 p-1.5 text-center">
+        <div className="rounded-lg border border-border bg-muted/40 p-1.5 text-center flex flex-col justify-center min-w-0">
           <div className="text-[9px] uppercase font-bold text-muted-foreground">Seller</div>
-          <div className="font-semibold text-foreground truncate" title={product.seller || "Unavailable"}>
-            {product.seller || "Unavailable"}
+          <div
+            className={`font-semibold text-[10.5px] leading-tight break-words line-clamp-2 mt-0.5 ${
+              !product.seller || product.seller === "Unavailable" || product.seller === "Seller unavailable"
+                ? "text-muted-foreground italic font-normal"
+                : "text-foreground"
+            }`}
+            title={product.seller && product.seller !== "Unavailable" ? product.seller : "Seller unavailable"}
+          >
+            {product.seller && product.seller !== "Unavailable" ? product.seller : "Seller unavailable"}
           </div>
         </div>
-        <div className="rounded-lg border border-border bg-muted/40 p-1.5 text-center">
+        <div className="rounded-lg border border-border bg-muted/40 p-1.5 text-center flex flex-col justify-center min-w-0">
           <div className="text-[9px] uppercase font-bold text-muted-foreground">Brand</div>
-          <div className="font-semibold text-foreground truncate" title={product.brand || "Unavailable"}>
+          <div className="font-semibold text-foreground truncate mt-0.5" title={product.brand || "Unavailable"}>
             {product.brand || "Unavailable"}
           </div>
         </div>
-        <div className="rounded-lg border border-border bg-muted/40 p-1.5 text-center">
+        <div className="rounded-lg border border-border bg-muted/40 p-1.5 text-center flex flex-col justify-center min-w-0">
           <div className="text-[9px] uppercase font-bold text-muted-foreground">Model</div>
-          <div className="font-semibold text-foreground truncate" title={product.model || "Unavailable"}>
+          <div className="font-semibold text-foreground truncate mt-0.5" title={product.model || "Unavailable"}>
             {product.model || "Unavailable"}
           </div>
         </div>
@@ -700,858 +1015,337 @@ function Ready({
         </Accordion>
       ) : null}
 
-      {/* Review Target Depth Selector (100 reviews default vs 300 deep) */}
-      <div className="rounded-xl border border-border bg-card p-2.5 flex items-center justify-between">
-        <div className="flex flex-col">
-          <div className="flex items-center gap-1.5">
-            <span className="text-[11.5px] font-bold text-foreground">Review Depth Target</span>
-            <span className="rounded bg-primary/10 text-primary border border-primary/20 px-1.5 py-0.5 text-[8.5px] font-mono font-bold">
-              {targetReviewCount === 300 ? "300 Deep" : "100 Standard"}
-            </span>
-          </div>
-          <span className="text-[10px] text-muted-foreground mt-0.5">
-            Multi-page collection depth for sentiment & fake review models
-          </span>
-        </div>
-        <div className="flex items-center gap-1 bg-muted/70 p-0.5 rounded-lg border border-border">
-          <button
-            type="button"
-            onClick={() => onSetTargetReviewCount && onSetTargetReviewCount(100)}
-            className={`px-2.5 py-1 text-[10.5px] font-bold rounded-md transition select-none ${
-              targetReviewCount === 100
-                ? "bg-primary text-primary-foreground shadow-sm"
-                : "text-muted-foreground hover:text-foreground"
-            }`}
-          >
-            100
-          </button>
-          <button
-            type="button"
-            onClick={() => onSetTargetReviewCount && onSetTargetReviewCount(300)}
-            className={`px-2.5 py-1 text-[10.5px] font-bold rounded-md transition select-none ${
-              targetReviewCount === 300
-                ? "bg-primary text-primary-foreground shadow-sm"
-                : "text-muted-foreground hover:text-foreground"
-            }`}
-          >
-            300 Max
-          </button>
-        </div>
-      </div>
-
-      {/* Review Detection Status Badge (Requirement 4 & 5) */}
-      <div className="rounded-xl border border-border bg-muted/40 px-3.5 py-2.5 flex items-center justify-between">
-        <div className="flex items-center gap-2">
-          <Star width={14} height={14} className="text-amber-500 fill-amber-500 shrink-0" />
-          <span className="text-[12px] font-medium text-foreground">
-            {detectedReviewsCount > 0
-              ? `${detectedReviewsCount} reviews in DOM • Target: ${targetReviewCount}`
-              : "0 reviews found in active page DOM"}
-          </span>
-        </div>
-        <span className={`rounded px-1.5 py-0.5 text-[9px] font-bold uppercase tracking-wider border shrink-0 ${
-          detectedReviewsCount > 0
-            ? "bg-safe-soft text-safe border-safe-border"
-            : "bg-caution-soft text-caution border-caution-border"
-        }`}>
-          {detectedReviewsCount > 0 ? "READY" : "SCROLL TO LOAD"}
-        </span>
-      </div>
-
-      {detectedReviewsCount === 0 ? (
-        <div className="rounded-lg bg-muted/60 border border-border/60 p-2.5 text-[11px] text-muted-foreground leading-relaxed flex items-start gap-2">
-          <Info width={13} height={13} className="shrink-0 mt-0.5 text-muted-foreground" />
-          <span>
-            Amazon renders reviews dynamically. Please scroll down to the &quot;Customer Reviews&quot; section on the Amazon page, then click &quot;Re-scan active tab&quot; below.
-          </span>
-        </div>
-      ) : null}
-
-      {/* Price Comparison section */}
-      {product ? (
-        <ComparablePricesSection
-          product={product}
-          comparison={comparison}
-          loading={comparisonLoading}
-          error={comparisonError}
-          onCompare={onComparePrices}
-        />
-      ) : null}
-
-      <div className="flex flex-col gap-2">
-        {detectedReviewsCount > 0 ? (
-          <Btn onClick={onAnalyze} className="w-full py-2.5 text-[13px]">
-            <Shield width={15} height={15} />
-            Collect & Analyze Reviews (Target: {targetReviewCount})
-          </Btn>
-        ) : (
-          <Btn onClick={onRetry} variant="outline" className="w-full py-2.5 text-[12.5px]">
-            <Refresh width={14} height={14} />
-            Re-scan active tab for reviews
-          </Btn>
-        )}
-      </div>
-
-      <div className="text-center pt-1">
+      {/* 3. Top-Level Navigation Tabs */}
+      <div className="grid grid-cols-2 p-1 rounded-xl bg-muted/60 border border-border">
         <button
-          onClick={() => go("manual")}
-          className="text-[11.5px] text-muted-foreground underline underline-offset-4 hover:text-foreground transition"
+          type="button"
+          onClick={() => setActiveTab("price")}
+          className={`py-2 px-3 text-[11.5px] font-bold rounded-lg transition-all duration-150 flex items-center justify-center gap-1.5 select-none ${
+            activeTab === "price"
+              ? "bg-card text-foreground shadow-sm border border-border"
+              : "text-muted-foreground hover:text-foreground"
+          }`}
         >
-          Paste reviews manually
+          <Tag width={13} height={13} className={activeTab === "price" ? "text-primary" : "text-muted-foreground"} />
+          <span>PRICE COMPARISON</span>
+        </button>
+        <button
+          type="button"
+          onClick={() => setActiveTab("review")}
+          className={`py-2 px-3 text-[11.5px] font-bold rounded-lg transition-all duration-150 flex items-center justify-center gap-1.5 select-none ${
+            activeTab === "review"
+              ? "bg-card text-foreground shadow-sm border border-border"
+              : "text-muted-foreground hover:text-foreground"
+          }`}
+        >
+          <Shield width={13} height={13} className={activeTab === "review" ? "text-primary" : "text-muted-foreground"} />
+          <span>REVIEW ANALYSIS</span>
         </button>
       </div>
-    </div>
-  );
-}
 
-/* ---------- 2. ANALYZING SCREEN ---------- */
+      {/* 4. Active Tab Content */}
 
-function Analyzing({
-  go,
-  targetReviewCount = 100,
-}: {
-  go: (v: View) => void;
-  targetReviewCount?: number;
-}) {
-  const [stepIndex, setStepIndex] = useState(0);
-  const steps = [
-    `Collecting customer reviews across pages (Target: ${targetReviewCount})...`,
-    "Deduplicating reviews and checking rating diversity (1★ to 5★)...",
-    "Running Model A (TF-IDF + Logistic Regression Sentiment)...",
-    "Running Model B (Kaggle Dataset CG vs OR Classification)...",
-    "Extracting functional product & logistics aspects...",
-    "Synthesizing Local Review Summary & recurring complaints...",
-    "Compiling Trust Report and authenticity score...",
-  ];
+      {/* TAB 1: PRICE COMPARISON */}
+      {activeTab === "price" ? (
+        <div className="flex flex-col gap-3">
+          <ComparablePricesSection
+            product={product}
+            comparison={comparison}
+            loading={comparisonLoading}
+            error={comparisonError}
+            onCompare={onComparePrices}
+          />
 
-  useEffect(() => {
-    const timer = setInterval(() => {
-      setStepIndex((prev) => (prev < steps.length - 1 ? prev + 1 : prev));
-    }, 450);
-    return () => clearInterval(timer);
-  }, [steps.length]);
-
-  return (
-    <div className="sg-fade flex flex-col items-center justify-center px-6 py-14 text-center gap-4">
-      <div className="flex h-12 w-12 items-center justify-center rounded-2xl border border-primary/20 bg-primary/10">
-        <Refresh width={22} height={22} className="animate-spin text-primary" />
-      </div>
-      <div>
-        <div className="text-[14px] font-semibold text-foreground">
-          Analyzing Reviews & Authenticity
-        </div>
-        <p className="mt-1.5 text-[12px] text-muted-foreground leading-relaxed max-w-[280px]">
-          {steps[stepIndex]}
-        </p>
-      </div>
-      <div className="w-48 bg-muted rounded-full h-1.5 overflow-hidden mt-1">
-        <div
-          className="bg-primary h-full transition-all duration-300"
-          style={{ width: `${((stepIndex + 1) / steps.length) * 100}%` }}
-        />
-      </div>
-    </div>
-  );
-}
-
-/* ---------- 3. RESULT SCREEN ---------- */
-
-function Result({
-  product,
-  reviewAnalysis,
-  reviewLoading,
-  reviewError,
-  go,
-  onRetryAnalysis,
-  analysisSource = "live_dom",
-  isDemoMode = false,
-  comparison,
-  comparisonLoading,
-  comparisonError,
-  onComparePrices,
-  targetReviewCount = 100,
-  onSetTargetReviewCount,
-}: {
-  product: ExtractedProduct | null;
-  reviewAnalysis?: BatchReviewAnalysisResponse | null;
-  reviewLoading?: boolean;
-  reviewError?: string | null;
-  go: (v: View) => void;
-  onRetryAnalysis: () => void;
-  analysisSource?: "live_dom" | "demo" | "manual";
-  isDemoMode?: boolean;
-  comparison?: ComparePricesResponse | null;
-  comparisonLoading?: boolean;
-  comparisonError?: string | null;
-  onComparePrices?: (customQuery?: string) => void;
-  targetReviewCount?: number;
-  onSetTargetReviewCount?: (target: number) => void;
-}) {
-  const [imgSrc, setImgSrc] = useState<string | null>(product?.image || null);
-  const [visibleReviewsCount, setVisibleReviewsCount] = useState<number>(10);
-
-  useEffect(() => {
-    setImgSrc(product?.image || null);
-  }, [product?.image]);
-
-  const productName = product?.product_name || reviewAnalysis?.product_name || "Product Customer Reviews";
-  const storeName = reviewAnalysis?.source_retailer || product?.source_retailer || "Amazon.in";
-  const asinText = product?.asin || product?.retailer_product_id;
-  const ra = reviewAnalysis;
-
-  // Sentiment calculations (Model A)
-  const posPct = ra?.sentiment_percentages?.positive ?? 0;
-  const neuPct = ra?.sentiment_percentages?.neutral ?? 0;
-  const negPct = ra?.sentiment_percentages?.negative ?? 0;
-
-  // Trust score and credibility
-  const trustScore = ra?.trust_score ?? 100;
-  let trustBadgeColor = "text-safe bg-safe-soft border-safe-border";
-  let trustLabel = "HIGH CREDIBILITY";
-  if (trustScore < 60) {
-    trustBadgeColor = "text-destructive bg-destructive/10 border-destructive/30";
-    trustLabel = "HIGH SUSPICION";
-  } else if (trustScore < 80) {
-    trustBadgeColor = "text-caution bg-caution-soft border-caution-border";
-    trustLabel = "MODERATE SIGNALS";
-  }
-
-  const pagesScanned = product?.scan_metadata?.pages_scanned || 1;
-  const targetCount = product?.scan_metadata?.target_count || targetReviewCount || 100;
-  const totalAnalyzed = ra?.total_reviews_analyzed ?? 0;
-
-  // Rating counts (1★ through 5★)
-  const ratingCounts: Record<string, number> = { "1": 0, "2": 0, "3": 0, "4": 0, "5": 0 };
-  if (ra?.rating_distribution && Object.keys(ra.rating_distribution).length > 0) {
-    Object.assign(ratingCounts, ra.rating_distribution);
-  } else if (product?.scan_metadata?.rating_distribution) {
-    Object.assign(ratingCounts, product.scan_metadata.rating_distribution);
-  } else if (ra?.analyzed_reviews) {
-    for (const r of ra.analyzed_reviews) {
-      if (r.rating) {
-        const k = String(Math.round(r.rating));
-        if (ratingCounts[k] !== undefined) ratingCounts[k]++;
-      }
-    }
-  }
-
-  // Filter and sort product aspects by mention count descending
-  const sortedAspects = ra?.aspect_analysis?.aspects
-    ? [...ra.aspect_analysis.aspects]
-        .filter((a) => a.category === "product" && a.mention_count > 0)
-        .sort((a, b) => b.mention_count - a.mention_count)
-    : [];
-  const primaryAspects = sortedAspects.slice(0, 3);
-  const remainingAspects = sortedAspects.slice(3);
-  const deliverySummary = ra?.aspect_analysis?.delivery_summary;
-
-  // Themes
-  const positiveThemes = ra?.llm_summary?.common_positive_themes || [];
-  const topPositiveThemes = positiveThemes.slice(0, 3);
-  const morePositiveThemes = positiveThemes.slice(3);
-
-  const complaints = ra?.llm_summary?.recurring_complaints || [];
-  const topComplaints = complaints.slice(0, 3);
-  const moreComplaints = complaints.slice(3);
-
-  const hasAdditionalInsights =
-    morePositiveThemes.length > 0 ||
-    moreComplaints.length > 0 ||
-    (ra?.llm_summary?.pros && ra.llm_summary.pros.length > 0) ||
-    (ra?.llm_summary?.cons && ra.llm_summary.cons.length > 0) ||
-    (ra?.llm_summary?.investigation_patterns && ra.llm_summary.investigation_patterns.length > 0);
-
-  return (
-    <div className="sg-fade flex flex-col px-4 py-3.5 gap-3 max-w-full overflow-hidden text-foreground">
-      {/* Top Navigation */}
-      <div className="flex items-center justify-between">
-        <button
-          onClick={() => go("ready")}
-          className="flex items-center gap-1.5 text-[11.5px] font-medium text-muted-foreground hover:text-foreground transition"
-        >
-          <ArrowLeft width={13} height={13} />
-          Back to Product
-        </button>
-        <div className="flex items-center gap-1.5">
-          {isDemoMode ? (
-            <span className="rounded bg-amber-500/15 text-amber-700 dark:text-amber-400 px-2 py-0.5 text-[9px] font-bold uppercase tracking-wider border border-amber-500/30">
-              DEMO PRESET
-            </span>
-          ) : (
-            <span className="rounded bg-safe-soft text-safe px-2 py-0.5 text-[9px] font-bold uppercase tracking-wider border border-safe-border">
-              LIVE DOM
-            </span>
-          )}
-          <span className="rounded bg-muted px-2 py-0.5 text-[9px] font-bold uppercase tracking-wider text-muted-foreground border border-border">
-            {storeName}
-          </span>
-        </div>
-      </div>
-
-      {/* 1. Compact Product Header */}
-      <div className="rounded-xl border border-border bg-card p-2.5 flex items-start gap-2.5">
-        <div className="h-10 w-10 shrink-0 overflow-hidden rounded-lg border border-border bg-muted flex items-center justify-center">
-          {imgSrc ? (
-            <img
-              src={imgSrc}
-              alt={productName}
-              onError={() => setImgSrc(null)}
-              className="h-full w-full object-cover"
-            />
-          ) : (
-            <Tag width={16} height={16} className="text-muted-foreground/50" />
-          )}
-        </div>
-        <div className="min-w-0 flex-1">
-          <div className="text-[12.5px] font-semibold leading-tight line-clamp-2 text-foreground" title={productName}>
-            {productName}
-          </div>
-          <div className="mt-1 flex flex-wrap items-center gap-x-2 gap-y-0.5 text-[10.5px] text-muted-foreground">
-            {product?.current_site_price ? (
-              <span className="font-bold text-foreground">
-                {INR(product.current_site_price)}
-              </span>
-            ) : null}
-            {product?.brand && product.brand !== "Unavailable" ? (
-              <>
-                <span>•</span>
-                <span className="truncate max-w-[100px]" title={product.brand}>{product.brand}</span>
-              </>
-            ) : null}
-            {product?.model && product.model !== "Unavailable" ? (
-              <>
-                <span>•</span>
-                <span className="truncate max-w-[90px]" title={product.model}>{product.model}</span>
-              </>
-            ) : null}
-            {product?.seller && product.seller !== "Unavailable" ? (
-              <>
-                <span>•</span>
-                <span className="truncate max-w-[90px]" title={product.seller}>By {product.seller}</span>
-              </>
-            ) : null}
-            {asinText ? (
-              <span className="rounded bg-muted/80 px-1 py-0.2 font-mono text-[9px] font-medium text-muted-foreground border border-border/60">
-                {asinText}
-              </span>
-            ) : null}
-          </div>
-        </div>
-      </div>
-
-      {/* Error state */}
-      {reviewError ? (
-        <div className="rounded-xl border border-destructive/30 bg-destructive/10 p-3 flex flex-col gap-2">
-          <div className="flex items-start gap-2">
-            <Warn width={15} height={15} className="mt-0.5 shrink-0 text-destructive" />
-            <div className="min-w-0 flex-1">
-              <div className="text-[12px] font-bold text-destructive">Could Not Retrieve Reviews</div>
-              <div className="text-[11px] text-foreground/85 mt-0.5 leading-relaxed">{reviewError}</div>
-            </div>
-          </div>
-          <div className="flex gap-2 mt-1">
-            <Btn onClick={onRetryAnalysis} variant="outline" className="py-1 px-2.5 text-[11.5px]">
-              <Refresh width={12} height={12} />
-              Retry Extraction
-            </Btn>
-            <Btn onClick={() => go("ready")} variant="secondary" className="py-1 px-2.5 text-[11.5px]">
-              Back to Product
-            </Btn>
-          </div>
-        </div>
-      ) : null}
-
-      {/* 2. Review Overview */}
-      {ra ? (
-        <div className="rounded-xl border border-border bg-card p-3 flex flex-col gap-2.5">
-          <div className="flex items-center justify-between">
-            <div className="flex items-center gap-1.5">
-              <Tag width={13} height={13} className="text-primary" />
-              <span className="text-[10px] font-bold uppercase tracking-[0.1em] text-foreground">
-                Review Overview
-              </span>
-            </div>
-            <div className="flex items-center gap-1.5">
-              <span className="text-[10px] text-muted-foreground">
-                {totalAnalyzed} analyzed <span className="text-[9px] opacity-70">(Target: {targetCount})</span>
-              </span>
-              <span className={`rounded px-1.5 py-0.5 text-[9px] font-bold uppercase tracking-wider border ${
-                posPct >= 65
-                  ? "bg-safe-soft text-safe border-safe-border"
-                  : negPct >= 40
-                  ? "bg-destructive/10 text-destructive border-destructive/30"
-                  : "bg-caution-soft text-caution border-caution-border"
-              }`}>
-                {ra.overall_sentiment_label}
-              </span>
-            </div>
-          </div>
-
-          {/* 3-color Segmented Progress Bar */}
-          <div className="w-full h-2 rounded-full overflow-hidden flex bg-muted">
-            <div style={{ width: `${posPct}%` }} className="bg-emerald-500 transition-all duration-300" title={`Positive: ${posPct}%`} />
-            <div style={{ width: `${neuPct}%` }} className="bg-slate-400 dark:bg-slate-600 transition-all duration-300" title={`Neutral: ${neuPct}%`} />
-            <div style={{ width: `${negPct}%` }} className="bg-rose-500 transition-all duration-300" title={`Negative: ${negPct}%`} />
-          </div>
-
-          {/* Sentiment Stat Triplets */}
-          <div className="grid grid-cols-3 gap-1.5">
-            <div className="rounded-lg bg-emerald-500/10 border border-emerald-500/20 py-1.5 px-2 text-center">
-              <div className="text-[9px] font-bold uppercase text-emerald-600 dark:text-emerald-400">Positive</div>
-              <div className="text-[13px] font-extrabold text-foreground leading-tight mt-0.5">{posPct}%</div>
-              <div className="text-[8.5px] text-muted-foreground">{ra.sentiment_distribution.positive} reviews</div>
-            </div>
-            <div className="rounded-lg bg-muted border border-border py-1.5 px-2 text-center">
-              <div className="text-[9px] font-bold uppercase text-muted-foreground">Neutral</div>
-              <div className="text-[13px] font-extrabold text-foreground leading-tight mt-0.5">{neuPct}%</div>
-              <div className="text-[8.5px] text-muted-foreground">{ra.sentiment_distribution.neutral} reviews</div>
-            </div>
-            <div className="rounded-lg bg-rose-500/10 border border-rose-500/20 py-1.5 px-2 text-center">
-              <div className="text-[9px] font-bold uppercase text-rose-600 dark:text-rose-400">Negative</div>
-              <div className="text-[13px] font-extrabold text-foreground leading-tight mt-0.5">{negPct}%</div>
-              <div className="text-[8.5px] text-muted-foreground">{ra.sentiment_distribution.negative} reviews</div>
-            </div>
-          </div>
-
-          {/* Rating Distribution (1★ to 5★) */}
-          <div className="pt-1 border-t border-border/60">
-            <div className="flex items-center justify-between text-[9.5px] text-muted-foreground mb-1.5">
-              <span className="font-semibold text-foreground flex items-center gap-1">
-                <Star width={11} height={11} className="text-amber-500 fill-amber-500" />
-                Rating Distribution
-              </span>
-              <span>{pagesScanned} page{pagesScanned > 1 ? "s" : ""} scanned</span>
-            </div>
-            <div className="grid grid-cols-5 gap-1">
-              {[5, 4, 3, 2, 1].map((star) => {
-                const count = ratingCounts[String(star)] || 0;
-                const pct = totalAnalyzed > 0 ? Math.round((count / totalAnalyzed) * 100) : 0;
-                return (
-                  <div key={star} className="rounded bg-muted/40 border border-border/50 py-1 px-0.5 text-center flex flex-col items-center">
-                    <span className="text-[9px] font-bold text-amber-500">★{star}</span>
-                    <span className="text-[11.5px] font-extrabold text-foreground my-0.5">{count}</span>
-                    <span className="text-[8px] text-muted-foreground">{pct}%</span>
-                  </div>
-                );
-              })}
-            </div>
-          </div>
-
-          {/* Small Sample Warning (< 15 reviews) */}
-          {totalAnalyzed > 0 && totalAnalyzed < 15 ? (
-            <div className="rounded-lg border border-amber-500/30 bg-amber-500/10 p-2 flex items-start gap-2">
-              <Warn width={14} height={14} className="mt-0.5 shrink-0 text-amber-600 dark:text-amber-400" />
-              <div className="text-[10.5px] text-foreground leading-relaxed">
-                <span className="font-bold text-amber-700 dark:text-amber-400">Small Sample Notice ({totalAnalyzed} reviews): </span>
-                Conclusions are based on available reviews on this listing and carry reduced statistical confidence.
-              </div>
-            </div>
-          ) : null}
-        </div>
-      ) : null}
-
-      {/* 3. Synthesized Review Summary & Purchase Verdict */}
-      {ra && ra.llm_summary ? (
-        <div className="rounded-xl border border-border bg-card p-3 flex flex-col gap-2.5">
-          {/* Header */}
-          <div className="flex items-center justify-between">
-            <div className="flex items-center gap-1.5">
-              <Sparkle width={13} height={13} className="text-amber-500" />
-              <span className="text-[10px] font-bold uppercase tracking-[0.1em] text-foreground">
-                Synthesized Review Summary
-              </span>
-            </div>
-            <div className="flex items-center gap-1.5">
-              <span className="text-[9.5px] text-muted-foreground font-mono">
-                {totalAnalyzed} of {targetCount} analyzed
-              </span>
-              <span className="rounded px-1.5 py-0.5 text-[8.5px] font-bold uppercase tracking-wider border bg-amber-500/10 text-amber-600 dark:text-amber-400 border-amber-500/30">
-                {ra.llm_summary.provider?.toLowerCase() === "local" ? "LOCAL NLP" : `${ra.llm_summary.provider?.toUpperCase()} AI`}
-              </span>
-            </div>
-          </div>
-
-          {/* Primary Synthesized Paragraph (60-100 words) */}
-          <div className="text-[11px] text-foreground/90 leading-relaxed bg-muted/40 rounded-lg p-2.5 border border-border/40 font-normal">
-            {ra.llm_summary.summary || "No review summary available."}
-          </div>
-
-          {/* Visually Distinct Purchase Verdict Card (Actionable Decision) */}
-          {ra.llm_summary.verdict ? (
-            <div className={`rounded-xl border p-2.5 flex flex-col gap-1.5 ${
-              ra.llm_summary.verdict_sentiment === "PROCEED" || ra.llm_summary.verdict_sentiment === "RECOMMENDED"
-                ? "border-emerald-500/35 bg-emerald-500/5"
-                : ra.llm_summary.verdict_sentiment === "PROCEED_WITH_CAUTION" || ra.llm_summary.verdict_sentiment === "RECOMMENDED_WITH_RESERVATIONS" || ra.llm_summary.verdict_sentiment === "MIXED_TRADE_OFFS"
-                ? "border-amber-500/35 bg-amber-500/5"
-                : ra.llm_summary.verdict_sentiment === "AVOID" || ra.llm_summary.verdict_sentiment === "NOT_RECOMMENDED"
-                ? "border-rose-500/35 bg-rose-500/5"
-                : "border-border bg-muted/30"
-            }`}>
-              <div className="flex items-center justify-between">
-                <span className="text-[9.5px] font-bold uppercase tracking-wider text-muted-foreground">
-                  Purchase Verdict
-                </span>
-                <span className={`rounded px-2 py-0.5 text-[9px] font-bold uppercase tracking-wider border ${
-                  ra.llm_summary.verdict_sentiment === "PROCEED" || ra.llm_summary.verdict_sentiment === "RECOMMENDED"
-                    ? "bg-emerald-500/15 text-emerald-600 dark:text-emerald-400 border-emerald-500/30"
-                    : ra.llm_summary.verdict_sentiment === "PROCEED_WITH_CAUTION" || ra.llm_summary.verdict_sentiment === "RECOMMENDED_WITH_RESERVATIONS" || ra.llm_summary.verdict_sentiment === "MIXED_TRADE_OFFS"
-                    ? "bg-amber-500/15 text-amber-700 dark:text-amber-400 border-amber-500/30"
-                    : ra.llm_summary.verdict_sentiment === "AVOID" || ra.llm_summary.verdict_sentiment === "NOT_RECOMMENDED"
-                    ? "bg-rose-500/15 text-rose-600 dark:text-rose-400 border-rose-500/30"
-                    : "bg-muted text-muted-foreground border-border"
-                }`}>
-                  {ra.llm_summary.verdict_sentiment === "PROCEED" || ra.llm_summary.verdict_sentiment === "RECOMMENDED"
-                    ? "PROCEED"
-                    : ra.llm_summary.verdict_sentiment === "PROCEED_WITH_CAUTION" || ra.llm_summary.verdict_sentiment === "RECOMMENDED_WITH_RESERVATIONS" || ra.llm_summary.verdict_sentiment === "MIXED_TRADE_OFFS"
-                    ? "PROCEED WITH CAUTION"
-                    : ra.llm_summary.verdict_sentiment === "AVOID" || ra.llm_summary.verdict_sentiment === "NOT_RECOMMENDED"
-                    ? "AVOID"
-                    : "INSUFFICIENT EVIDENCE"}
-                </span>
-              </div>
-
-              {/* 1 Short Plain-English Reason immediately below the prominent verdict label */}
-              <div className="text-[11.5px] font-medium text-foreground leading-snug">
-                {ra.llm_summary.verdict}
-              </div>
-
-              {/* Optional brief supporting detail */}
-              {ra.llm_summary.verdict_detail ? (
-                <div className="text-[10px] text-muted-foreground leading-tight">
-                  {ra.llm_summary.verdict_detail}
-                </div>
-              ) : null}
-            </div>
-          ) : null}
-
-          {/* Evidence Confidence Indicator */}
-          <div className="rounded-lg bg-muted/40 border border-border/50 p-2 flex flex-col gap-1">
-            <div className="flex items-center justify-between text-[9.5px]">
-              <span className="font-bold uppercase tracking-wider text-muted-foreground">
-                Evidence Confidence
-              </span>
-              <span className={`font-mono font-bold px-1.5 py-0.2 rounded text-[8.5px] border ${
-                (ra.llm_summary.confidence_score ?? 50) >= 75
-                  ? "bg-emerald-500/10 text-emerald-600 dark:text-emerald-400 border-emerald-500/25"
-                  : (ra.llm_summary.confidence_score ?? 50) >= 50
-                  ? "bg-amber-500/10 text-amber-700 dark:text-amber-400 border-amber-500/25"
-                  : "bg-muted text-muted-foreground border-border"
-              }`}>
-                {ra.llm_summary.confidence_level || "MODERATE"} ({ra.llm_summary.confidence_score ?? 50}/100)
-              </span>
-            </div>
-
-            {/* Confidence Bar */}
-            <div className="w-full h-1.5 rounded-full overflow-hidden bg-muted">
-              <div
-                style={{ width: `${ra.llm_summary.confidence_score ?? 50}%` }}
-                className={`h-full transition-all duration-300 ${
-                  (ra.llm_summary.confidence_score ?? 50) >= 75
-                    ? "bg-emerald-500"
-                    : (ra.llm_summary.confidence_score ?? 50) >= 50
-                    ? "bg-amber-500"
-                    : "bg-muted-foreground"
-                }`}
-              />
-            </div>
-
-            <div className="text-[9px] text-muted-foreground leading-relaxed flex items-start gap-1 pt-0.5">
-              <Info width={11} height={11} className="shrink-0 mt-0.5 text-muted-foreground" />
-              <span>
-                {ra.llm_summary.confidence_explanation || `Confidence reflects the statistical reliability of ${totalAnalyzed} analyzed reviews, not an absolute guarantee of product quality.`}
-              </span>
-            </div>
-          </div>
-        </div>
-      ) : null}
-
-      {/* 4. Review Authenticity & Credibility (Combined Model B + Heuristics) */}
-      {ra ? (
-        <div className="rounded-xl border border-border bg-card p-3 flex flex-col gap-2.5">
-          <div className="flex items-center justify-between">
-            <div className="flex items-center gap-1.5">
-              <Shield width={13} height={13} className="text-violet-500" />
-              <span className="text-[10px] font-bold uppercase tracking-[0.1em] text-foreground">
-                Review Authenticity & Credibility
-              </span>
-            </div>
-            <span className={`rounded px-1.5 py-0.5 text-[9px] font-bold uppercase tracking-wider border ${trustBadgeColor}`}>
-              {trustLabel} ({trustScore}/100)
-            </span>
-          </div>
-
-          {/* Plain language overview */}
-          <div className="text-[11px] text-muted-foreground leading-relaxed bg-muted/40 rounded-lg p-2.5 border border-border/40">
-            Credibility evaluates review authenticity independent of customer sentiment. High ratings can still display synthetic or repetitive patterns.
-          </div>
-
-          {/* Combined Credibility Stats */}
-          <div className="grid grid-cols-2 gap-2">
-            {/* Model B: CG vs OR */}
-            {ra.fake_review_analysis ? (
-              <div className="rounded-lg bg-sky-500/10 border border-sky-500/20 p-2 text-center">
-                <div className="text-[9px] font-bold uppercase text-sky-600 dark:text-sky-400">
-                  Model B Classifier
-                </div>
-                <div className="text-[13px] font-extrabold text-foreground mt-0.5">
-                  {ra.fake_review_analysis.or_percentage}% <span className="text-[10px] font-semibold text-muted-foreground">Original</span>
-                </div>
-                <div className="text-[8.5px] text-muted-foreground mt-0.5">
-                  {ra.fake_review_analysis.cg_count} computer-generated ({ra.fake_review_analysis.cg_percentage}%)
-                </div>
-              </div>
-            ) : null}
-
-            {/* Heuristic Suspicion */}
-            <div className="rounded-lg bg-violet-500/10 border border-violet-500/20 p-2 text-center">
-              <div className="text-[9px] font-bold uppercase text-violet-600 dark:text-violet-400">
-                Pattern Analysis
-              </div>
-              <div className="text-[13px] font-extrabold text-foreground mt-0.5">
-                {ra.suspicious_analysis.suspicious_count} <span className="text-[10px] font-semibold text-muted-foreground">Flagged</span>
-              </div>
-              <div className="text-[8.5px] text-muted-foreground mt-0.5">
-                {ra.suspicious_analysis.suspicion_rate}% of {ra.suspicious_analysis.total_analyzed} reviews
-              </div>
-            </div>
-          </div>
-
-          {/* Expandable Technical Signals and Flagged Reviews */}
-          <Accordion
-            label="Technical Signals & Flagged Reviews"
-            badge={ra.suspicious_analysis.suspicious_count > 0 ? `${ra.suspicious_analysis.suspicious_count} SIGNALS` : "CLEAN"}
-          >
-            <div className="flex flex-col gap-2 pt-1">
-              <div className="text-[10px] text-muted-foreground leading-relaxed">
-                Statistical anomalies flagged by rule heuristics (repetition, extreme sentiment-rating divergence, boilerplate):
-              </div>
-              <div className="grid grid-cols-2 gap-1 text-[10.5px]">
-                <div className="rounded border border-border bg-background p-1.5 flex justify-between items-center">
-                  <span className="text-muted-foreground truncate">Exact duplicates:</span>
-                  <span className="font-bold text-foreground ml-1">
-                    {ra.suspicious_analysis.flags_breakdown.exact_duplicate || 0}
-                  </span>
-                </div>
-                <div className="rounded border border-border bg-background p-1.5 flex justify-between items-center">
-                  <span className="text-muted-foreground truncate">Rating mismatch:</span>
-                  <span className="font-bold text-foreground ml-1">
-                    {ra.suspicious_analysis.flags_breakdown.rating_sentiment_mismatch || 0}
-                  </span>
-                </div>
-                <div className="rounded border border-border bg-background p-1.5 flex justify-between items-center">
-                  <span className="text-muted-foreground truncate">Promotional text:</span>
-                  <span className="font-bold text-foreground ml-1">
-                    {ra.suspicious_analysis.flags_breakdown.promotional_keywords || 0}
-                  </span>
-                </div>
-                <div className="rounded border border-border bg-background p-1.5 flex justify-between items-center">
-                  <span className="text-muted-foreground truncate">Generic boilerplate:</span>
-                  <span className="font-bold text-foreground ml-1">
-                    {ra.suspicious_analysis.flags_breakdown.short_generic_boilerplate || 0}
-                  </span>
-                </div>
-              </div>
-
-              {ra.suspicious_analysis.flagged_reviews.length > 0 ? (
-                <div className="mt-1 flex flex-col gap-1.5 max-h-48 overflow-y-auto pr-1">
-                  <span className="text-[10px] font-bold text-foreground">Flagged Reviews:</span>
-                  {ra.suspicious_analysis.flagged_reviews.map((f, idx) => (
-                    <div key={idx} className="rounded border border-border bg-muted/40 p-2 text-[10.5px] flex flex-col gap-1">
-                      <div className="flex items-center justify-between text-muted-foreground">
-                        <span className="font-semibold text-foreground">{f.author || "Reviewer"}</span>
-                        {f.rating ? <span>★ {f.rating}/5</span> : null}
-                      </div>
-                      <div className="text-foreground/90 italic leading-snug line-clamp-2">
-                        &quot;{f.review_text}&quot;
-                      </div>
-                      <div className="flex flex-wrap gap-1 mt-0.5">
-                        {f.reasons.map((r, rIdx) => (
-                          <span key={rIdx} className="rounded bg-rose-500/10 border border-rose-500/25 text-rose-700 dark:text-rose-400 px-1 py-0.2 text-[8.5px] font-semibold">
-                            {r}
-                          </span>
-                        ))}
-                      </div>
-                    </div>
-                  ))}
-                </div>
-              ) : null}
-
-              <div className="rounded bg-muted/40 p-1.5 text-[9.5px] text-muted-foreground leading-relaxed flex items-start gap-1.5 border border-border/40 mt-0.5">
-                <Info width={11} height={11} className="shrink-0 mt-0.5 text-muted-foreground" />
-                <span>Credibility signals highlight risk indicators and pattern divergence, not absolute proof of fraud.</span>
-              </div>
-            </div>
-          </Accordion>
-        </div>
-      ) : null}
-
-      {/* 5. Product Aspect Analysis */}
-      {primaryAspects.length > 0 ? (
-        <div className="rounded-xl border border-border bg-card p-3 flex flex-col gap-2.5">
-          <div className="flex items-center justify-between">
-            <span className="text-[10px] font-bold uppercase tracking-[0.1em] text-foreground">
-              Key Product Aspects
-            </span>
-            <span className="text-[9.5px] text-muted-foreground font-mono">
-              Sorted by Mentions
-            </span>
-          </div>
-
-          <div className="flex flex-col gap-2">
-            {primaryAspects.map((asp) => (
-              <div key={asp.aspect_id} className="rounded-lg border border-border/70 bg-muted/30 p-2.5 flex flex-col gap-1.5">
-                <div className="flex items-center justify-between text-[11.5px]">
-                  <span className="font-semibold text-foreground">{asp.display_name}</span>
-                  <div className="flex items-center gap-1.5 text-[10px] text-muted-foreground">
-                    <span className="text-emerald-600 dark:text-emerald-400 font-semibold">{asp.positive_percentage}% pos</span>
-                    <span>•</span>
-                    <span>{asp.mention_count} mention{asp.mention_count > 1 ? "s" : ""}</span>
-                  </div>
-                </div>
-
-                {/* Aspect Sentiment Bar */}
-                <div className="w-full h-1.5 rounded-full overflow-hidden flex bg-muted">
-                  <div style={{ width: `${asp.positive_percentage}%` }} className="bg-emerald-500" />
-                  <div style={{ width: `${asp.negative_percentage}%` }} className="bg-rose-500" />
-                </div>
-
-                {/* Sample Excerpt */}
-                {asp.positive_excerpts.length > 0 ? (
-                  <div className="text-[10px] text-emerald-700 dark:text-emerald-400 bg-emerald-500/10 rounded px-1.5 py-0.5 leading-snug line-clamp-1 italic">
-                    &quot;{asp.positive_excerpts[0]}&quot;
-                  </div>
-                ) : asp.negative_excerpts.length > 0 ? (
-                  <div className="text-[10px] text-rose-700 dark:text-rose-400 bg-rose-500/10 rounded px-1.5 py-0.5 leading-snug line-clamp-1 italic">
-                    &quot;{asp.negative_excerpts[0]}&quot;
-                  </div>
-                ) : null}
-              </div>
-            ))}
-          </div>
-
-          {/* Expandable Remaining Aspects and Delivery */}
-          {(remainingAspects.length > 0 || (deliverySummary && deliverySummary.mentions > 0)) ? (
-            <Accordion label={`More Aspects & Delivery (${remainingAspects.length + (deliverySummary && deliverySummary.mentions > 0 ? 1 : 0)})`}>
-              <div className="flex flex-col gap-2 pt-1">
-                {remainingAspects.map((asp) => (
-                  <div key={asp.aspect_id} className="rounded border border-border bg-background p-2 flex flex-col gap-1">
-                    <div className="flex items-center justify-between text-[11px]">
-                      <span className="font-semibold text-foreground">{asp.display_name}</span>
-                      <span className="text-[9.5px] text-muted-foreground">{asp.mention_count} mentions ({asp.positive_percentage}% pos)</span>
-                    </div>
-                    {asp.positive_excerpts.length > 0 ? (
-                      <div className="text-[9.5px] italic text-muted-foreground line-clamp-1">
-                        &quot;{asp.positive_excerpts[0]}&quot;
-                      </div>
-                    ) : null}
-                  </div>
-                ))}
-
-                {deliverySummary && deliverySummary.mentions > 0 ? (
-                  <div className="rounded border border-border bg-muted/40 p-2 flex flex-col gap-1 mt-1">
-                    <div className="flex items-center justify-between text-[11px]">
-                      <span className="font-semibold text-foreground">Delivery & Packaging Experience</span>
-                      <span className="text-[9.5px] text-muted-foreground">{deliverySummary.mentions} mentions</span>
-                    </div>
-                    <div className="text-[10px] text-muted-foreground">
-                      Positive delivery sentiment: <strong className="text-foreground">{deliverySummary.positive_percentage}%</strong>
-                    </div>
-                    {deliverySummary.sample_quote ? (
-                      <div className="text-[9.5px] italic text-muted-foreground bg-background rounded p-1 border border-border/50 line-clamp-2">
-                        &quot;{deliverySummary.sample_quote}&quot;
-                      </div>
-                    ) : null}
-                  </div>
-                ) : null}
-              </div>
-            </Accordion>
-          ) : null}
-        </div>
-      ) : null}
-
-      {/* 6. Individual Customer Reviews (Collapsible & Paginated) */}
-      {ra && ra.analyzed_reviews.length > 0 ? (
-        <Accordion label={`All Customer Reviews (${ra.analyzed_reviews.length})`} badge="RAW">
           <div className="flex flex-col gap-2 pt-1">
-            <div className="flex flex-col gap-2 max-h-72 overflow-y-auto pr-1">
-              {ra.analyzed_reviews.slice(0, visibleReviewsCount).map((r, i) => (
-                <div key={r.id || i} className="rounded-lg border border-border bg-muted/30 p-2 text-[10.5px] flex flex-col gap-1">
+            <Btn onClick={onRetry} variant="outline" className="w-full py-2 text-[12px]">
+              <Refresh width={13} height={13} />
+              Re-scan active tab
+            </Btn>
+          </div>
+        </div>
+      ) : null}
+
+      {/* TAB 2: REVIEW ANALYSIS */}
+      {activeTab === "review" ? (
+        <div className="flex flex-col gap-3">
+          {/* A. If Loading / In-Progress */}
+          {reviewLoading ? (
+            <div className="rounded-xl border border-border bg-card p-5 flex flex-col items-center justify-center text-center gap-3">
+              <div className="flex h-11 w-11 items-center justify-center rounded-2xl border border-primary/20 bg-primary/10">
+                <Refresh width={20} height={20} className="animate-spin text-primary" />
+              </div>
+              <div>
+                <div className="text-[13.5px] font-semibold text-foreground">Analyzing Reviews & Authenticity</div>
+                <p className="mt-1 text-[11.5px] text-muted-foreground leading-relaxed max-w-[280px]">
+                  {analysisStep || "Running multi-page collection & sentiment inference in background..."}
+                </p>
+              </div>
+            </div>
+          ) : reviewError ? (
+            /* B. If Error */
+            <div className="rounded-xl border border-destructive/30 bg-destructive/10 p-3.5 flex flex-col gap-2">
+              <div className="flex items-start gap-2">
+                <Warn width={15} height={15} className="mt-0.5 shrink-0 text-destructive" />
+                <div className="min-w-0 flex-1">
+                  <div className="text-[12px] font-bold text-destructive">Could Not Complete Analysis</div>
+                  <div className="text-[11px] text-foreground/85 mt-0.5 leading-relaxed">{reviewError}</div>
+                </div>
+              </div>
+              <Btn onClick={onAnalyze} variant="outline" className="py-1 px-3 text-[11.5px] self-start mt-1">
+                <Refresh width={12} height={12} />
+                Retry Analysis
+              </Btn>
+            </div>
+          ) : !ra ? (
+            /* C. If Not Yet Analyzed */
+            <div className="rounded-xl border border-border bg-card p-3.5 flex flex-col gap-3">
+              <div className="flex items-center gap-2">
+                <Shield width={15} height={15} className="text-primary" />
+                <span className="text-[12px] font-bold text-foreground">Product Review Intelligence</span>
+              </div>
+              <p className="text-[11.5px] text-muted-foreground leading-relaxed">
+                Evaluate customer sentiment, verified purchase experiences, fake-review patterns, and dynamic product aspects without external LLM APIs.
+              </p>
+              <Btn onClick={onAnalyze} className="w-full py-2.5 text-[13px]">
+                <Shield width={15} height={15} />
+                Analyze Customer Reviews
+              </Btn>
+              <div className="text-center pt-0.5">
+                <button
+                  onClick={() => go("manual")}
+                  className="text-[11px] text-muted-foreground underline underline-offset-4 hover:text-foreground transition"
+                >
+                  Or paste review text manually
+                </button>
+              </div>
+            </div>
+          ) : (
+            /* D. If Analysis Available */
+            <div className="flex flex-col gap-3">
+              {/* Coverage & Count Banner */}
+              <div className="flex items-center justify-between px-3 py-2 rounded-xl bg-muted/40 border border-border/60 text-[11px]">
+                <span className="text-muted-foreground">
+                  Analyzed <strong className="text-foreground">{totalAnalyzed}</strong> customer {totalAnalyzed === 1 ? "review" : "reviews"}
+                  {product.reviews_total && product.reviews_total > totalAnalyzed ? (
+                    <span className="text-muted-foreground/80"> (out of {product.reviews_total.toLocaleString()} total on listing)</span>
+                  ) : null}
+                </span>
+                <span className="text-[10px] font-semibold text-muted-foreground uppercase tracking-wider">
+                  {product.source_retailer || "Verified"}
+                </span>
+              </div>
+
+              {/* Purchase Verdict & Concise Review Summary */}
+              {ra.llm_summary ? (
+                <div className="rounded-xl border border-border bg-card p-3 flex flex-col gap-2.5">
                   <div className="flex items-center justify-between">
-                    <span className="font-semibold text-foreground truncate pr-1">
-                      {r.author || "Amazon Customer"}
-                    </span>
-                    <div className="flex items-center gap-1 shrink-0">
-                      {r.rating ? <span className="text-amber-500 font-bold">★{r.rating}</span> : null}
-                      <span className={`rounded px-1 py-0.2 text-[8px] font-bold uppercase ${
-                        r.sentiment === "positive"
-                          ? "bg-emerald-500/15 text-emerald-600 dark:text-emerald-400"
-                          : r.sentiment === "negative"
-                          ? "bg-rose-500/15 text-rose-600 dark:text-rose-400"
-                          : "bg-muted text-muted-foreground"
-                      }`}>
-                        {r.sentiment}
+                    <div className="flex items-center gap-1.5">
+                      <Sparkle width={13} height={13} className="text-amber-500" />
+                      <span className="text-[10px] font-bold uppercase tracking-[0.1em] text-foreground">
+                        Synthesized Review Summary
                       </span>
-                      {r.cg_label ? (
-                        <span className={`rounded px-1 py-0.2 text-[8px] font-mono font-bold uppercase ${
-                          r.cg_label === "CG"
-                            ? "bg-violet-500/15 text-violet-600 dark:text-violet-400 border border-violet-500/30"
-                            : "bg-sky-500/15 text-sky-600 dark:text-sky-400 border border-sky-500/30"
-                        }`}>
-                          {r.cg_label}
-                        </span>
-                      ) : null}
+                    </div>
+                    <span className="rounded px-1.5 py-0.5 text-[8.5px] font-bold uppercase tracking-wider border bg-amber-500/10 text-amber-600 dark:text-amber-400 border-amber-500/30">
+                      {ra.llm_summary.provider?.toLowerCase() === "local" ? "LOCAL NLP" : "DEALSENSE AI"}
+                    </span>
+                  </div>
+
+                  {/* Concise Natural Language Summary */}
+                  {ra.llm_summary.summary ? (
+                    <div className="text-[11px] text-foreground/90 leading-relaxed bg-muted/30 rounded-lg p-2.5 border border-border/50">
+                      {ra.llm_summary.summary}
+                    </div>
+                  ) : null}
+
+                  {/* Purchase Verdict Card */}
+                  <div className={`rounded-xl border p-2.5 flex flex-col gap-1 ${
+                    ra.llm_summary.verdict_sentiment === "PROCEED" || ra.llm_summary.verdict_sentiment === "RECOMMENDED"
+                      ? "border-emerald-500/30 bg-emerald-500/10"
+                      : ra.llm_summary.verdict_sentiment === "AVOID" || ra.llm_summary.verdict_sentiment === "NOT_RECOMMENDED"
+                      ? "border-rose-500/30 bg-rose-500/10"
+                      : "border-amber-500/30 bg-amber-500/10"
+                  }`}>
+                    <div className="flex items-center justify-between">
+                      <span className="text-[9.5px] font-extrabold uppercase tracking-widest text-muted-foreground">
+                        Purchase Verdict
+                      </span>
+                      <span className={`rounded px-1.5 py-0.5 text-[9px] font-extrabold uppercase tracking-wider border ${
+                        ra.llm_summary.verdict_sentiment === "PROCEED" || ra.llm_summary.verdict_sentiment === "RECOMMENDED"
+                          ? "border-emerald-500/40 text-emerald-600 dark:text-emerald-400 bg-emerald-500/15"
+                          : ra.llm_summary.verdict_sentiment === "AVOID" || ra.llm_summary.verdict_sentiment === "NOT_RECOMMENDED"
+                          ? "border-rose-500/40 text-rose-600 dark:text-rose-400 bg-rose-500/15"
+                          : "border-amber-500/40 text-amber-700 dark:text-amber-400 bg-amber-500/15"
+                      }`}>
+                        {ra.llm_summary.verdict_sentiment === "PROCEED" || ra.llm_summary.verdict_sentiment === "RECOMMENDED"
+                          ? "PROCEED"
+                          : ra.llm_summary.verdict_sentiment === "PROCEED_WITH_CAUTION" || ra.llm_summary.verdict_sentiment === "RECOMMENDED_WITH_RESERVATIONS" || ra.llm_summary.verdict_sentiment === "MIXED_TRADE_OFFS"
+                          ? "PROCEED WITH CAUTION"
+                          : ra.llm_summary.verdict_sentiment === "AVOID" || ra.llm_summary.verdict_sentiment === "NOT_RECOMMENDED"
+                          ? "AVOID"
+                          : "INSUFFICIENT EVIDENCE"}
+                      </span>
+                    </div>
+
+                    <div className="text-[11.5px] font-medium text-foreground leading-snug">
+                      {ra.llm_summary.verdict}
+                    </div>
+
+                    {ra.llm_summary.verdict_detail ? (
+                      <div className="text-[10px] text-muted-foreground leading-tight">
+                        {ra.llm_summary.verdict_detail}
+                      </div>
+                    ) : null}
+                  </div>
+                </div>
+              ) : null}
+
+              {/* Review Authenticity & Credibility */}
+              <div className="rounded-xl border border-border bg-card p-3 flex flex-col gap-2.5">
+                <div className="flex items-center justify-between">
+                  <div className="flex items-center gap-1.5">
+                    <Shield width={13} height={13} className="text-violet-500" />
+                    <span className="text-[10px] font-bold uppercase tracking-[0.1em] text-foreground">
+                      Review Authenticity & Credibility
+                    </span>
+                  </div>
+                  <span className={`rounded px-1.5 py-0.5 text-[9px] font-bold uppercase tracking-wider border ${trustBadgeColor}`}>
+                    {trustLabel} ({trustScore}/100)
+                  </span>
+                </div>
+
+                <div className="text-[11px] text-muted-foreground leading-relaxed bg-muted/40 rounded-lg p-2.5 border border-border/40">
+                  Credibility evaluates review authenticity independent of customer sentiment. High ratings can still display synthetic or repetitive patterns.
+                </div>
+
+                <div className="grid grid-cols-2 gap-2">
+                  {ra.fake_review_analysis ? (
+                    <div className="rounded-lg bg-sky-500/10 border border-sky-500/20 p-2 text-center">
+                      <div className="text-[9px] font-bold uppercase text-sky-600 dark:text-sky-400">
+                        Model B Classifier
+                      </div>
+                      <div className="text-[13px] font-extrabold text-foreground mt-0.5">
+                        {ra.fake_review_analysis.or_percentage}% <span className="text-[10px] font-semibold text-muted-foreground">Original</span>
+                      </div>
+                      <div className="text-[8.5px] text-muted-foreground mt-0.5">
+                        {ra.fake_review_analysis.cg_count} computer-generated ({ra.fake_review_analysis.cg_percentage}%)
+                      </div>
+                    </div>
+                  ) : null}
+
+                  <div className="rounded-lg bg-violet-500/10 border border-violet-500/20 p-2 text-center">
+                    <div className="text-[9px] font-bold uppercase text-violet-600 dark:text-violet-400">
+                      Pattern Analysis
+                    </div>
+                    <div className="text-[13px] font-extrabold text-foreground mt-0.5">
+                      {ra.suspicious_analysis.suspicious_count} <span className="text-[10px] font-semibold text-muted-foreground">Flagged</span>
+                    </div>
+                    <div className="text-[8.5px] text-muted-foreground mt-0.5">
+                      {ra.suspicious_analysis.patterns_identified?.length || 0} anomaly pattern(s)
                     </div>
                   </div>
-                  <div className="text-foreground/90 leading-snug line-clamp-3">
-                    {r.text}
-                  </div>
-                  {r.date ? (
-                    <div className="text-[9px] text-muted-foreground">{r.date}</div>
+                </div>
+              </div>
+
+              {/* PRODUCT ASPECTS */}
+              <div className="rounded-xl border border-border bg-card p-3 flex flex-col gap-2.5">
+                <div className="flex items-center justify-between">
+                  <span className="text-[10px] font-bold uppercase tracking-[0.1em] text-foreground">
+                    PRODUCT ASPECTS
+                  </span>
+                  {allAspects.length > 0 ? (
+                    <span className="text-[9.5px] text-muted-foreground font-mono">
+                      {allAspects.length} aspect{allAspects.length > 1 ? "s" : ""}
+                    </span>
                   ) : null}
                 </div>
-              ))}
-            </div>
 
-            {/* Pagination Controls */}
-            {visibleReviewsCount < ra.analyzed_reviews.length ? (
-              <div className="flex gap-2 pt-1">
-                <button
-                  type="button"
-                  onClick={() => setVisibleReviewsCount((prev) => Math.min(prev + 15, ra.analyzed_reviews.length))}
-                  className="flex-1 rounded-lg border border-border bg-card py-1.5 text-[11px] font-semibold text-foreground hover:bg-muted transition"
-                >
-                  Load 15 more ({visibleReviewsCount} of {ra.analyzed_reviews.length})
-                </button>
-                <button
-                  type="button"
-                  onClick={() => setVisibleReviewsCount(ra.analyzed_reviews.length)}
-                  className="rounded-lg border border-border bg-card px-2.5 py-1.5 text-[11px] font-semibold text-muted-foreground hover:text-foreground transition"
-                >
-                  Show all
-                </button>
+                {allAspects.length > 0 ? (
+                  <div className="flex flex-col gap-1.5">
+                    {displayedAspects.map((asp) => {
+                      const badge = getAspectSentiment(asp);
+                      const explanation = getAspectExplanation(asp);
+                      return (
+                        <div
+                          key={asp.aspect_id || asp.display_name}
+                          className="flex items-baseline justify-between gap-2.5 py-1.5 px-2.5 rounded-lg border border-border/70 bg-muted/20"
+                        >
+                          <div className="text-[11px] text-foreground leading-snug min-w-0 flex-1">
+                            <span className="font-bold text-foreground">{asp.display_name}</span>
+                            <span className="text-muted-foreground mx-1.5">—</span>
+                            <span className="text-foreground/85">{explanation}</span>
+                          </div>
+                          <span
+                            className={`rounded px-1.5 py-0.5 text-[8.5px] font-bold uppercase tracking-wider border shrink-0 ${badge.className}`}
+                          >
+                            {badge.label}
+                          </span>
+                        </div>
+                      );
+                    })}
+
+                    {allAspects.length > 5 ? (
+                      <button
+                        type="button"
+                        onClick={() => setShowAllAspects((prev) => !prev)}
+                        className="flex items-center justify-center gap-1.5 py-1 text-[11px] font-semibold text-muted-foreground hover:text-foreground transition-colors mt-0.5"
+                      >
+                        <span>{showAllAspects ? "Show less" : `Show more (${allAspects.length - 5} more)`}</span>
+                        <ChevronDown
+                          width={12}
+                          height={12}
+                          className={`transition-transform duration-200 ${showAllAspects ? "rotate-180" : ""}`}
+                        />
+                      </button>
+                    ) : null}
+                  </div>
+                ) : (
+                  <div className="text-[11px] text-muted-foreground py-1 text-center italic">
+                    Not enough review data to identify product aspects.
+                  </div>
+                )}
               </div>
-            ) : null}
-          </div>
-        </Accordion>
+
+              {/* Small Sample Warning (< 15 reviews) */}
+              {totalAnalyzed > 0 && totalAnalyzed < 15 ? (
+                <div className="rounded-lg border border-amber-500/30 bg-amber-500/10 p-2 flex items-start gap-2">
+                  <Warn width={14} height={14} className="mt-0.5 shrink-0 text-amber-600 dark:text-amber-400" />
+                  <div className="text-[10.5px] text-foreground leading-relaxed">
+                    <span className="font-bold text-amber-700 dark:text-amber-400">Limited Sample ({totalAnalyzed} reviews): </span>
+                    Conclusions are based on available reviews on this listing and carry reduced statistical confidence.
+                  </div>
+                </div>
+              ) : null}
+
+              {/* Data limitation note if collection stopped before listing total */}
+              {ra?.data_limitations ? (
+                <div className="rounded-lg border border-border/80 bg-muted/30 p-2.5 flex items-start gap-2">
+                  <Info width={13} height={13} className="mt-0.5 shrink-0 text-muted-foreground" />
+                  <div className="text-[10.5px] text-muted-foreground leading-relaxed">
+                    {ra.data_limitations}
+                  </div>
+                </div>
+              ) : null}
+
+              {/* Action Buttons */}
+              <div className="flex gap-2 pt-1">
+                <Btn onClick={onAnalyze} variant="outline" className="flex-1 py-2 text-[11.5px]">
+                  <Refresh width={12} height={12} />
+                  Re-analyze Reviews
+                </Btn>
+                <Btn onClick={() => setActiveTab("price")} variant="secondary" className="flex-1 py-2 text-[11.5px]">
+                  <Tag width={12} height={12} />
+                  View Price Comparison
+                </Btn>
+              </div>
+            </div>
+          )}
+        </div>
       ) : null}
-
-      {/* 7. Footer Status */}
-      <div className="rounded-lg border border-border/60 bg-muted/20 px-2.5 py-1.5 text-[9.5px] text-muted-foreground font-mono flex items-center justify-between">
-        <span>SOURCE: {analysisSource.toUpperCase()}</span>
-        <span>MODELS: TF-IDF + LR & KAGGLE CG/OR</span>
-      </div>
-
-      <div className="pt-0.5">
-        <Btn onClick={() => go("ready")} variant="outline" className="w-full py-2 text-[12px]">
-          <ArrowLeft width={13} height={13} />
-          Back to Product
-        </Btn>
-      </div>
     </div>
   );
 }
 
-/* ---------- 4. MANUAL SCREEN ---------- */
+/* ---------- 2. MANUAL SCREEN ---------- */
 
 function Manual({
   go,
@@ -1637,12 +1431,6 @@ function Manual({
           <Shield width={14} height={14} />
           Analyze Pasted Reviews
         </Btn>
-
-        {onLoadSampleReviews ? (
-          <Btn onClick={onLoadSampleReviews} variant="secondary" className="w-full py-2 text-[12px]">
-            Try Demo Mode (Sample Dataset)
-          </Btn>
-        ) : null}
       </div>
     </div>
   );
@@ -1653,11 +1441,9 @@ function Manual({
 function SettingsScreen({
   go,
   prevView,
-  onLoadSampleReviews,
 }: {
   go: (v: View) => void;
   prevView: View;
-  onLoadSampleReviews?: () => void;
 }) {
   const [theme, setTheme] = useState<"system" | "light" | "dark">("system");
 
@@ -1692,25 +1478,6 @@ function SettingsScreen({
                 {t}
               </button>
             ))}
-          </div>
-        </div>
-
-        <Divider />
-
-        <div>
-          <div className="text-[10px] font-bold uppercase tracking-[0.1em] text-muted-foreground mb-2">
-            Offline Demo Testing
-          </div>
-          <div className="rounded-xl border border-border bg-card p-3 flex flex-col gap-2">
-            <p className="text-[11.5px] text-muted-foreground leading-relaxed">
-              Run review intelligence against pre-packaged demo dataset without requiring an active shopping tab.
-            </p>
-            {onLoadSampleReviews ? (
-              <Btn onClick={onLoadSampleReviews} variant="outline" className="w-full py-2 text-[12px]">
-                <Shield width={13} height={13} />
-                Load Demo Dataset (11 Reviews)
-              </Btn>
-            ) : null}
           </div>
         </div>
 
@@ -1754,7 +1521,7 @@ function SettingsScreen({
   );
 }
 
-/* ---------- 6. SCREEN ROUTER ---------- */
+/* ---------- 4. SCREEN ROUTER ---------- */
 
 export function ScreenRouter({
   product = null,
@@ -1767,78 +1534,42 @@ export function ScreenRouter({
   reviewAnalysis = null,
   reviewLoading = false,
   reviewError = null,
+  analysisStep = null,
   onAnalyzeReviews = () => {},
-  onLoadSampleReviews,
   analysisSource = "live_dom",
-  isDemoMode = false,
   comparison = null,
   comparisonLoading = false,
   comparisonError = null,
   onComparePrices = () => {},
-  targetReviewCount = 100,
-  onSetTargetReviewCount = () => {},
 }: Props) {
   switch (view) {
-    case "ready":
-      return (
-        <Ready
-          product={product}
-          status={status}
-          go={go}
-          onAnalyze={onAnalyze}
-          onRetry={onRetry}
-          onLoadSampleReviews={onLoadSampleReviews}
-          isDemoMode={isDemoMode}
-          comparison={comparison}
-          comparisonLoading={comparisonLoading}
-          comparisonError={comparisonError}
-          onComparePrices={onComparePrices}
-          targetReviewCount={targetReviewCount}
-          onSetTargetReviewCount={onSetTargetReviewCount}
-        />
-      );
-    case "analyzing":
-      return <Analyzing go={go} targetReviewCount={targetReviewCount} />;
-    case "result":
-      return (
-        <Result
-          product={product}
-          reviewAnalysis={reviewAnalysis}
-          reviewLoading={reviewLoading}
-          reviewError={reviewError}
-          go={go}
-          onRetryAnalysis={onAnalyze}
-          analysisSource={analysisSource}
-          isDemoMode={isDemoMode}
-          targetReviewCount={targetReviewCount}
-        />
-      );
     case "settings":
-      return <SettingsScreen go={go} prevView={prevView} onLoadSampleReviews={onLoadSampleReviews} />;
+      return <SettingsScreen go={go} prevView={prevView} />;
     case "manual":
       return (
         <Manual
           go={go}
           onAnalyzeCustomReviews={onAnalyzeReviews}
-          onLoadSampleReviews={onLoadSampleReviews}
         />
       );
     default:
       return (
-        <Ready
+        <ProductDashboard
           product={product}
           status={status}
+          view={view}
           go={go}
           onAnalyze={onAnalyze}
           onRetry={onRetry}
-          onLoadSampleReviews={onLoadSampleReviews}
-          isDemoMode={isDemoMode}
+          reviewAnalysis={reviewAnalysis}
+          reviewLoading={reviewLoading || view === "analyzing"}
+          reviewError={reviewError}
+          analysisStep={analysisStep}
+          analysisSource={analysisSource}
           comparison={comparison}
           comparisonLoading={comparisonLoading}
           comparisonError={comparisonError}
           onComparePrices={onComparePrices}
-          targetReviewCount={targetReviewCount}
-          onSetTargetReviewCount={onSetTargetReviewCount}
         />
       );
   }

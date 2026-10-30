@@ -170,7 +170,7 @@ REVIEWS:
 
 Return a valid JSON object strictly matching this schema:
 {{
-  "summary": "A concise 60-100 word synthesis covering overall customer experience, strongest benefit, significant recurring drawback or defect, and concluding assessment of whether the product appears worthwhile.",
+  "summary": "A short, natural 2-3 sentence synthesis describing what customers generally like, what they dislike, and whether the product seems worth considering. Do not include percentages, review counts, or statistical explanations.",
   "verdict_sentiment": "PROCEED, PROCEED_WITH_CAUTION, or AVOID",
   "verdict": "One short, plain-English reason explaining the decision.",
   "verdict_detail": "Optional brief supporting detail.",

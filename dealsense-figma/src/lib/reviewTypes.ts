@@ -19,6 +19,8 @@ export interface AspectItem {
   negative_percentage: number;
   positive_excerpts: string[];
   negative_excerpts: string[];
+  summary?: string | null;
+  sentiment_label?: string | null;
 }
 
 export interface ProConItem {
